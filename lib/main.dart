@@ -611,9 +611,13 @@ class StoreDb {
   Future<void> cancelSale(int saleId) async {
     final db = await database;
     await db.transaction((txn) async {
-      final sale = (await txn.query('sales', where: 'id=?', whereArgs: [saleId])).single;
+      final saleRows =
+          await txn.query('sales', where: 'id=?', whereArgs: [saleId]);
+      if (saleRows.isEmpty) throw Exception('Không tìm thấy hóa đơn');
+      final sale = saleRows.single;
       if (sale['status'] == 'cancelled') return;
-      final items = await txn.query('sale_items', where: 'sale_id=?', whereArgs: [saleId]);
+      final items =
+          await txn.query('sale_items', where: 'sale_id=?', whereArgs: [saleId]);
       final now = DateTime.now().toIso8601String();
       for (final item in items) {
         final productId = item['product_id'] as int;
@@ -623,7 +627,8 @@ class StoreDb {
           await txn.update('serial_units', {'status': 'in_stock'},
               where: 'id=?', whereArgs: [serialId]);
         } else {
-          await txn.rawUpdate('UPDATE products SET quantity=quantity+? WHERE id=?',
+          await txn.rawUpdate(
+              'UPDATE products SET quantity=quantity+? WHERE id=?',
               [qty, productId]);
         }
         await txn.insert('inventory_movements', {
@@ -638,6 +643,50 @@ class StoreDb {
       }
       await txn.update('sales', {'status': 'cancelled'},
           where: 'id=?', whereArgs: [saleId]);
+    });
+  }
+
+  Future<void> deleteSale(int saleId) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final saleRows =
+          await txn.query('sales', where: 'id=?', whereArgs: [saleId]);
+      if (saleRows.isEmpty) throw Exception('Không tìm thấy hóa đơn');
+      final sale = saleRows.single;
+      final items =
+          await txn.query('sale_items', where: 'sale_id=?', whereArgs: [saleId]);
+
+      // Hóa đơn chưa hủy vẫn đang trừ tồn, nên phải hoàn tồn trước khi xóa.
+      if (sale['status'] != 'cancelled') {
+        for (final item in items) {
+          final productId = item['product_id'] as int;
+          final serialId = item['serial_id'] as int?;
+          final qty = item['quantity'] as int;
+          if (serialId != null) {
+            await txn.update('serial_units', {'status': 'in_stock'},
+                where: 'id=?', whereArgs: [serialId]);
+          } else {
+            await txn.rawUpdate(
+                'UPDATE products SET quantity=quantity+? WHERE id=?',
+                [qty, productId]);
+          }
+        }
+      }
+
+      // Xóa các dữ liệu con trước để giữ toàn vẹn khóa ngoại.
+      await txn.rawDelete(
+        '''DELETE FROM warranty_claims
+           WHERE sale_item_id IN
+             (SELECT id FROM sale_items WHERE sale_id=?)''',
+        [saleId],
+      );
+      await txn.delete(
+        'inventory_movements',
+        where: "reference_type='sale' AND reference_id=?",
+        whereArgs: [saleId],
+      );
+      await txn.delete('sale_items', where: 'sale_id=?', whereArgs: [saleId]);
+      await txn.delete('sales', where: 'id=?', whereArgs: [saleId]);
     });
   }
 
@@ -2788,6 +2837,7 @@ class InvoicesPage extends StatefulWidget {
 
 class _InvoicesPageState extends State<InvoicesPage> {
   String search = '';
+
   @override
   Widget build(BuildContext context) => Column(children: [
     const PageHeader('Hóa đơn'),
@@ -2798,45 +2848,136 @@ class _InvoicesPageState extends State<InvoicesPage> {
           prefixIcon: Icon(Icons.search),
           hintText: 'Tìm tên khách, tên máy, mã hóa đơn hoặc IMEI',
         ),
-        onChanged: (value) => setState(() => search = value.trim().toLowerCase()),
+        onChanged: (value) =>
+            setState(() => search = value.trim().toLowerCase()),
       ),
     ),
     const SizedBox(height: 8),
-    Expanded(child: FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.sales(), builder: (context, snap) {
-      final rows = (snap.data ?? []).where((sale) {
-        final haystack = '${sale['customer']} ${sale['phone']} ${sale['code']} '
-            '${sale['product_names'] ?? ''} ${sale['imeis'] ?? ''} '
-            '${formatDateTime(sale['created_at'])}';
-        return haystack.toLowerCase().contains(search);
-      }).toList();
-      if (!snap.hasData) {
-        return const Center(child: CircularProgressIndicator());
-      }
-      if (rows.isEmpty) {
-        return Center(child: Text(search.isEmpty
-            ? 'Chưa có hóa đơn' : 'Không tìm thấy hóa đơn phù hợp'));
-      }
-      return ListView.separated(padding: const EdgeInsets.all(16), itemCount: rows.length, separatorBuilder: (_, __) => const SizedBox(height: 8), itemBuilder: (context, i) {
-        final s = rows[i]; final cancelled = s['status'] == 'cancelled';
-        return Card(child: ListTile(
-          title: Row(children: [Expanded(child: Text('${s['customer']}', style: const TextStyle(fontWeight: FontWeight.bold))), Text(vnd(s['total'] as int))]),
-          subtitle: Text('${s['product_names'] ?? 'Hàng hóa'}\n'
-              '${s['code']} • Ngày bán: ${formatDateTime(s['created_at'])}\n'
-              '${cancelled ? 'ĐÃ HỦY' : 'Bảo hành: ${warrantyLabel(s['warranty_months'] as int)} • Nợ: ${vnd(s['debt'] as int)}'}'),
-          isThreeLine: true,
-          trailing: cancelled ? null : IconButton(icon: const Icon(Icons.cancel_outlined, color: Colors.red), onPressed: () => cancel(s['id'] as int)),
-          onTap: () async {
-            await Navigator.push(context, MaterialPageRoute(
-                builder: (_) => InvoiceDetailPage(saleId: s['id'] as int)));
-            if (mounted) setState(() {});
+    Expanded(child: FutureBuilder<List<Map<String, Object?>>>(
+      future: StoreDb.instance.sales(),
+      builder: (context, snap) {
+        final rows = (snap.data ?? []).where((sale) {
+          final haystack =
+              '${sale['customer']} ${sale['phone']} ${sale['code']} '
+              '${sale['product_names'] ?? ''} ${sale['imeis'] ?? ''} '
+              '${formatDateTime(sale['created_at'])}';
+          return haystack.toLowerCase().contains(search);
+        }).toList();
+        if (!snap.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (rows.isEmpty) {
+          return Center(child: Text(search.isEmpty
+              ? 'Chưa có hóa đơn'
+              : 'Không tìm thấy hóa đơn phù hợp'));
+        }
+        return ListView.separated(
+          padding: const EdgeInsets.all(16),
+          itemCount: rows.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 8),
+          itemBuilder: (context, i) {
+            final sale = rows[i];
+            final cancelled = sale['status'] == 'cancelled';
+            return Card(child: ListTile(
+              title: Row(children: [
+                Expanded(child: Text(
+                  '${sale['customer']}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                )),
+                Text(vnd(sale['total'] as int)),
+              ]),
+              subtitle: Text(
+                '${sale['product_names'] ?? 'Hàng hóa'}\n'
+                '${sale['code']} • Ngày bán: '
+                '${formatDateTime(sale['created_at'])}\n'
+                '${cancelled ? 'ĐÃ HỦY' : 'Bảo hành: ${warrantyLabel(sale['warranty_months'] as int)} • Nợ: ${vnd(sale['debt'] as int)}'}',
+              ),
+              isThreeLine: true,
+              trailing: PopupMenuButton<String>(
+                tooltip: 'Thao tác hóa đơn',
+                onSelected: (action) {
+                  if (action == 'cancel') {
+                    cancel(sale['id'] as int);
+                  } else if (action == 'delete') {
+                    delete(sale['id'] as int);
+                  }
+                },
+                itemBuilder: (_) => [
+                  if (!cancelled)
+                    const PopupMenuItem(
+                      value: 'cancel',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.cancel_outlined,
+                            color: Colors.orange),
+                        title: Text('Hủy hóa đơn'),
+                      ),
+                    ),
+                  const PopupMenuItem(
+                    value: 'delete',
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.delete_forever, color: Colors.red),
+                      title: Text('Xóa hóa đơn'),
+                    ),
+                  ),
+                ],
+              ),
+              onTap: () async {
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        InvoiceDetailPage(saleId: sale['id'] as int),
+                  ),
+                );
+                if (mounted) setState(() {});
+              },
+            ));
           },
-        ));
-      });
-    })),
+        );
+      },
+    )),
   ]);
+
   Future<void> cancel(int id) async {
-    if (!await confirm(context, 'Hủy hóa đơn', 'Hủy hóa đơn sẽ hoàn lại tồn kho và loại số liệu khỏi doanh thu. Tiếp tục?')) return;
-    await StoreDb.instance.cancelSale(id); setState(() {}); widget.onChanged();
+    final accepted = await confirm(
+      context,
+      'Hủy hóa đơn',
+      'Hủy hóa đơn sẽ hoàn lại tồn kho và loại số liệu khỏi doanh thu. '
+          'Tiếp tục?',
+    );
+    if (!accepted) return;
+    try {
+      await StoreDb.instance.cancelSale(id);
+      if (mounted) setState(() {});
+      widget.onChanged();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> delete(int id) async {
+    final accepted = await confirm(
+      context,
+      'Xóa vĩnh viễn hóa đơn',
+      'Hóa đơn sẽ bị xóa khỏi lịch sử. Tồn kho/IMEI được hoàn lại, '
+          'công nợ, doanh thu, lợi nhuận và dữ liệu bảo hành liên quan '
+          'cũng được loại bỏ. Thao tác này không thể hoàn tác.',
+    );
+    if (!accepted) return;
+    try {
+      await StoreDb.instance.deleteSale(id);
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đã xóa hóa đơn và hoàn lại tồn kho')),
+        );
+      }
+      widget.onChanged();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
   }
 }
 
@@ -2850,7 +2991,9 @@ class InvoiceDetailPage extends StatelessWidget {
     body: FutureBuilder<Map<String, Object?>>(
       future: StoreDb.instance.saleDetail(saleId),
       builder: (context, snap) {
-        if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+        if (!snap.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
         final sale = snap.data!['sale'] as Map<String, Object?>;
         final items = snap.data!['items'] as List<Map<String, Object?>>;
         final discountTotal = (sale['discount_total'] as num? ?? 0).toInt();
@@ -2859,65 +3002,153 @@ class InvoiceDetailPage extends StatelessWidget {
         final receipt = ReceiptDocument.invoice(sale, items);
         return ListView(padding: const EdgeInsets.all(16), children: [
           FilledButton.icon(
-            onPressed: () => Navigator.push(context, MaterialPageRoute(
-                builder: (_) => ReceiptPreviewPage(receipt: receipt))),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ReceiptPreviewPage(receipt: receipt),
+              ),
+            ),
             icon: const Icon(Icons.print),
             label: const Text('In / chia sẻ hóa đơn'),
           ),
           const SizedBox(height: 12),
-          Card(child: Padding(padding: const EdgeInsets.all(16), child:
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('${sale['code']}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              infoLine('Ngày bán', formatDateTime(sale['created_at'])),
-              infoLine('Khách hàng', '${sale['customer']}'),
-              infoLine('Số điện thoại', '${sale['phone']}'.trim().isEmpty ? 'Không ghi' : '${sale['phone']}'),
-              infoLine('Trạng thái', sale['status'] == 'cancelled' ? 'Đã hủy' : 'Hoàn thành'),
-            ]),
+          Card(child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${sale['code']}',
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                infoLine('Ngày bán', formatDateTime(sale['created_at'])),
+                infoLine('Khách hàng', '${sale['customer']}'),
+                infoLine(
+                  'Số điện thoại',
+                  '${sale['phone']}'.trim().isEmpty
+                      ? 'Không ghi'
+                      : '${sale['phone']}',
+                ),
+                infoLine(
+                  'Trạng thái',
+                  sale['status'] == 'cancelled' ? 'Đã hủy' : 'Hoàn thành',
+                ),
+              ],
+            ),
           )),
           const SizedBox(height: 12),
-          const Text('Hàng đã bán', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+          const Text(
+            'Hàng đã bán',
+            style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 8),
           ...items.map((item) => Card(child: ListTile(
             leading: const CircleAvatar(child: Icon(Icons.phone_android)),
-            title: Text('${item['product_name']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+            title: Text(
+              '${item['product_name']}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
             subtitle: Text([
-              if ('${item['imei']}'.trim().isNotEmpty && item['imei'] != null) 'IMEI: ${item['imei']}',
+              if ('${item['imei']}'.trim().isNotEmpty &&
+                  item['imei'] != null)
+                'IMEI: ${item['imei']}',
               'Số lượng: ${item['quantity']}',
               'Đơn giá: ${vnd(item['unit_price'] as int)}',
             ].join('\n')),
             isThreeLine: true,
           ))),
           const SizedBox(height: 12),
-          Card(child: Padding(padding: const EdgeInsets.all(16), child:
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Thanh toán', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              if (discountTotal > 0) ...[
-                infoLine('Tạm tính', vnd((sale['total'] as int) + discountTotal)),
-                infoLine('Giảm giá', '-${vnd(discountTotal)}'),
+          Card(child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Thanh toán',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                if (discountTotal > 0) ...[
+                  infoLine(
+                    'Tạm tính',
+                    vnd((sale['total'] as int) + discountTotal),
+                  ),
+                  infoLine('Giảm giá', '-${vnd(discountTotal)}'),
+                ],
+                infoLine('Tổng tiền', vnd(sale['total'] as int)),
+                infoLine('Tiền mặt', vnd(sale['paid_cash'] as int)),
+                infoLine(
+                    'Chuyển khoản', vnd(sale['paid_transfer'] as int)),
+                infoLine('Khách còn nợ', vnd(sale['debt'] as int)),
               ],
-              infoLine('Tổng tiền', vnd(sale['total'] as int)),
-              infoLine('Tiền mặt', vnd(sale['paid_cash'] as int)),
-              infoLine('Chuyển khoản', vnd(sale['paid_transfer'] as int)),
-              infoLine('Khách còn nợ', vnd(sale['debt'] as int)),
-            ]),
+            ),
           )),
           const SizedBox(height: 12),
-          Card(child: Padding(padding: const EdgeInsets.all(16), child:
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Bảo hành', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              infoLine('Thời hạn', warrantyLabel(months)),
-              infoLine('Ngày bắt đầu', soldAt == null ? 'Không rõ' : DateFormat('dd/MM/yyyy').format(soldAt)),
-              infoLine('Ngày hết hạn', months <= 0 || soldAt == null
-                  ? 'Không có' : DateFormat('dd/MM/yyyy').format(addMonths(soldAt, months))),
-            ]),
+          Card(child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Bảo hành',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                infoLine('Thời hạn', warrantyLabel(months)),
+                infoLine(
+                  'Ngày bắt đầu',
+                  soldAt == null
+                      ? 'Không rõ'
+                      : DateFormat('dd/MM/yyyy').format(soldAt),
+                ),
+                infoLine(
+                  'Ngày hết hạn',
+                  months <= 0 || soldAt == null
+                      ? 'Không có'
+                      : DateFormat('dd/MM/yyyy')
+                          .format(addMonths(soldAt, months)),
+                ),
+              ],
+            ),
           )),
+          const SizedBox(height: 16),
+          TextButton.icon(
+            onPressed: () => delete(context),
+            icon: const Icon(Icons.delete_forever),
+            label: const Text('Xóa hóa đơn'),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+          ),
+          const SizedBox(height: 16),
         ]);
       },
     ),
   );
+
+  Future<void> delete(BuildContext context) async {
+    final accepted = await confirm(
+      context,
+      'Xóa vĩnh viễn hóa đơn',
+      'Hóa đơn sẽ bị xóa khỏi lịch sử. Tồn kho/IMEI được hoàn lại, '
+          'công nợ, doanh thu, lợi nhuận và dữ liệu bảo hành liên quan '
+          'cũng được loại bỏ. Thao tác này không thể hoàn tác.',
+    );
+    if (!accepted) return;
+    try {
+      await StoreDb.instance.deleteSale(saleId);
+      if (context.mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đã xóa hóa đơn và hoàn lại tồn kho')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  }
 }
 
 class MorePage extends StatelessWidget {
