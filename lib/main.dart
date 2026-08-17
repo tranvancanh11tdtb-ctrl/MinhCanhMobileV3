@@ -233,6 +233,11 @@ class StoreDb {
   }
 
   Future<void> _createV4Tables(DatabaseExecutor db) async {
+    final saleColumns = await db.rawQuery('PRAGMA table_info(sales)');
+    if (!saleColumns.any((column) => column['name'] == 'discount_total')) {
+      await db.execute('''ALTER TABLE sales ADD COLUMN
+        discount_total INTEGER NOT NULL DEFAULT 0''');
+    }
     await db.execute('''CREATE TABLE IF NOT EXISTS debt_adjustments(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       party_type TEXT NOT NULL,
@@ -492,6 +497,7 @@ class StoreDb {
     required int quantity,
     required int? serialId,
     required int unitPrice,
+    required int discountPerItem,
     required String customer,
     required String phone,
     required int cash,
@@ -516,8 +522,14 @@ class StoreDb {
         if (quantity <= 0 || quantity > stock) throw Exception('Số lượng bán vượt tồn kho');
         cost = (fresh['avg_cost'] as int) * quantity;
       }
-      final total = unitPrice * (tracks ? 1 : quantity);
       if (unitPrice <= 0) throw Exception('Giá bán phải lớn hơn 0');
+      if (discountPerItem < 0 || discountPerItem > unitPrice) {
+        throw Exception('Giảm giá bán không hợp lệ');
+      }
+      final soldQuantity = tracks ? 1 : quantity;
+      final netUnitPrice = unitPrice - discountPerItem;
+      final discountTotal = discountPerItem * soldQuantity;
+      final total = netUnitPrice * soldQuantity;
       if (cash < 0 || transfer < 0 || cash + transfer > total) {
         throw Exception('Số tiền thanh toán không hợp lệ');
       }
@@ -528,6 +540,7 @@ class StoreDb {
         'customer': customer.trim().isEmpty ? 'Khách lẻ' : customer.trim(),
         'phone': phone.trim(),
         'total': total,
+        'discount_total': discountTotal,
         'cost_total': cost,
         'paid_cash': cash,
         'paid_transfer': transfer,
@@ -540,7 +553,7 @@ class StoreDb {
         'product_id': productId,
         'serial_id': serialId,
         'quantity': tracks ? 1 : quantity,
-        'unit_price': unitPrice,
+        'unit_price': netUnitPrice,
         'unit_cost': tracks ? cost : (product['avg_cost'] as int),
       });
       if (tracks) {
@@ -2286,6 +2299,7 @@ class _SalePageState extends State<SalePage> {
   int? serialId;
   int quantity = 1;
   final price = TextEditingController();
+  final saleDiscount = TextEditingController(text: '0');
   final customer = TextEditingController();
   final phone = TextEditingController();
   final cash = TextEditingController();
@@ -2301,6 +2315,42 @@ class _SalePageState extends State<SalePage> {
     super.initState();
     _loadCustomers();
   }
+
+  @override
+  void dispose() {
+    price.dispose();
+    saleDiscount.dispose();
+    customer.dispose();
+    phone.dispose();
+    cash.dispose();
+    transfer.dispose();
+    customWarranty.dispose();
+    super.dispose();
+  }
+
+  int get saleQuantity => product?['track_imei'] == 1 ? 1 : quantity;
+  int get listedUnitPrice => int.tryParse(price.text) ?? 0;
+  int get discountPerItem => int.tryParse(saleDiscount.text) ?? 0;
+  int get netSalePrice => listedUnitPrice >= discountPerItem
+      ? listedUnitPrice - discountPerItem : 0;
+  int get saleTotal => saleQuantity * netSalePrice;
+  int get customerDebt {
+    final value = saleTotal - (int.tryParse(cash.text) ?? 0)
+        - (int.tryParse(transfer.text) ?? 0);
+    return value < 0 ? 0 : value;
+  }
+
+  Widget _saleSummaryRow(String label, String value, {bool strong = false}) =>
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(children: [
+          Expanded(child: Text(label,
+              style: TextStyle(fontWeight:
+                  strong ? FontWeight.bold : FontWeight.w500))),
+          Text(value, style: TextStyle(fontSize: 16,
+              fontWeight: strong ? FontWeight.bold : FontWeight.w500)),
+        ]),
+      );
 
   Future<void> _loadCustomers({int? selectId}) async {
     final rows = await StoreDb.instance.customerDirectory();
@@ -2344,11 +2394,33 @@ class _SalePageState extends State<SalePage> {
     Expanded(child: FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.products(), builder: (context, snap) {
       final products = (snap.data ?? []).where((p) => (p['stock'] as int) > 0).toList();
       return ListView(padding: const EdgeInsets.all(16), children: [
-        DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn hàng còn tồn'), initialValue: product?['id'] as int?, items: products.map((p) => DropdownMenuItem(value: p['id'] as int, child: Text('${p['name']} • tồn ${p['stock']}'))).toList(), onChanged: (id) => setState(() { product = products.firstWhere((p) => p['id'] == id); serialId = null; price.text = '${product!['sale_price']}'; })),
+        DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn hàng còn tồn'), initialValue: product?['id'] as int?, items: products.map((p) => DropdownMenuItem(value: p['id'] as int, child: Text('${p['name']} • tồn ${p['stock']}'))).toList(), onChanged: (id) => setState(() { product = products.firstWhere((p) => p['id'] == id); serialId = null; quantity = 1; price.text = '${product!['sale_price']}'; saleDiscount.text = '0'; })),
         if (product?['track_imei'] == 1) FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.serials(product!['id'] as int, status: 'in_stock'), builder: (context, ss) => Padding(padding: const EdgeInsets.only(top: 12), child: DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn IMEI *'), initialValue: serialId, items: (ss.data ?? []).map((s) => DropdownMenuItem(value: s['id'] as int, child: Text('${s['imei']} • ${s['color']}'))).toList(), onChanged: (v) => setState(() => serialId = v))))
-        else if (product != null) Padding(padding: const EdgeInsets.only(top: 12), child: TextFormField(initialValue: '1', keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Số lượng'), onChanged: (v) => quantity = int.tryParse(v) ?? 0)),
+        else if (product != null) Padding(padding: const EdgeInsets.only(top: 12), child: TextFormField(initialValue: '1', keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.digitsOnly], decoration: const InputDecoration(labelText: 'Số lượng'), onChanged: (v) => setState(() => quantity = int.tryParse(v) ?? 0))),
         const SizedBox(height: 12),
-        TextField(controller: price, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Giá bán *')),
+        TextField(controller: price, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(labelText: 'Giá bán *'),
+            onChanged: (_) => setState(() {})),
+        const SizedBox(height: 12),
+        TextField(controller: saleDiscount, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(
+                labelText: 'Giảm giá trên mỗi sản phẩm'),
+            onChanged: (_) => setState(() {})),
+        if (product != null) ...[
+          const SizedBox(height: 12),
+          Card(color: const Color(0xFFF5F7FA), child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(children: [
+              _saleSummaryRow('Số lượng bán', '$saleQuantity'),
+              _saleSummaryRow('Giá bán', vnd(listedUnitPrice)),
+              _saleSummaryRow('Giảm giá', vnd(discountPerItem)),
+              _saleSummaryRow('Giá sau giảm', vnd(netSalePrice), strong: true),
+              _saleSummaryRow('Khách phải trả', vnd(saleTotal), strong: true),
+            ]),
+          )),
+        ],
         const SizedBox(height: 12),
         DropdownButtonFormField<int>(
           key: ValueKey('customer-$selectedCustomerId-${customers.length}'),
@@ -2372,9 +2444,16 @@ class _SalePageState extends State<SalePage> {
               style: const TextStyle(color: Colors.black54)),
         ],
         const SizedBox(height: 12),
-        TextField(controller: cash, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Tiền mặt')),
+        TextField(controller: cash, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(labelText: 'Tiền mặt'),
+            onChanged: (_) => setState(() {})),
         const SizedBox(height: 12),
-        TextField(controller: transfer, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Chuyển khoản')),
+        TextField(controller: transfer, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(labelText: 'Chuyển khoản',
+                helperText: 'Khách còn nợ: ${vnd(customerDebt)}'),
+            onChanged: (_) => setState(() {})),
         const SizedBox(height: 12),
         const Text('Phần tiền còn lại sau tiền mặt và chuyển khoản sẽ tự ghi là khách nợ.',
             style: TextStyle(color: Colors.black54)),
@@ -2406,12 +2485,22 @@ class _SalePageState extends State<SalePage> {
 
   Future<void> complete() async {
     if (product == null) return showError(context, 'Hãy chọn sản phẩm');
+    if (listedUnitPrice <= 0) return showError(context, 'Giá bán phải lớn hơn 0');
+    if (discountPerItem < 0 || discountPerItem > listedUnitPrice) {
+      return showError(context, 'Giảm giá không được lớn hơn giá bán');
+    }
     final warrantyMonths = warranty == -1 ? (int.tryParse(customWarranty.text) ?? -1) : warranty;
     if (warrantyMonths < 0) return showError(context, 'Số tháng bảo hành không hợp lệ');
     setState(() => saving = true);
     try {
-      await StoreDb.instance.completeSale(product: product!, quantity: quantity, serialId: serialId, unitPrice: int.tryParse(price.text) ?? 0, customer: customer.text, phone: phone.text, cash: int.tryParse(cash.text) ?? 0, transfer: int.tryParse(transfer.text) ?? 0, warrantyMonths: warrantyMonths);
-      customer.clear(); phone.clear(); cash.clear(); transfer.clear(); price.clear(); customWarranty.clear();
+      await StoreDb.instance.completeSale(product: product!, quantity: quantity,
+          serialId: serialId, unitPrice: listedUnitPrice,
+          discountPerItem: discountPerItem, customer: customer.text,
+          phone: phone.text, cash: int.tryParse(cash.text) ?? 0,
+          transfer: int.tryParse(transfer.text) ?? 0,
+          warrantyMonths: warrantyMonths);
+      customer.clear(); phone.clear(); cash.clear(); transfer.clear(); price.clear();
+      saleDiscount.text = '0'; customWarranty.clear();
       setState(() { product = null; serialId = null; quantity = 1;
         warranty = 0; selectedCustomerId = 0; saving = false; });
       widget.onChanged();
@@ -2494,6 +2583,7 @@ class InvoiceDetailPage extends StatelessWidget {
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
         final sale = snap.data!['sale'] as Map<String, Object?>;
         final items = snap.data!['items'] as List<Map<String, Object?>>;
+        final discountTotal = (sale['discount_total'] as num? ?? 0).toInt();
         final months = sale['warranty_months'] as int;
         final soldAt = parseDate(sale['created_at']);
         final receipt = ReceiptDocument.invoice(sale, items);
@@ -2533,6 +2623,10 @@ class InvoiceDetailPage extends StatelessWidget {
             Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               const Text('Thanh toán', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
+              if (discountTotal > 0) ...[
+                infoLine('Tạm tính', vnd((sale['total'] as int) + discountTotal)),
+                infoLine('Giảm giá', '-${vnd(discountTotal)}'),
+              ],
               infoLine('Tổng tiền', vnd(sale['total'] as int)),
               infoLine('Tiền mặt', vnd(sale['paid_cash'] as int)),
               infoLine('Chuyển khoản', vnd(sale['paid_transfer'] as int)),
@@ -4508,6 +4602,7 @@ class ReceiptDocument {
       Map<String, Object?> sale, List<Map<String, Object?>> rows) {
     final months = sale['warranty_months'] as int;
     final soldAt = parseDate(sale['created_at']);
+    final discountTotal = (sale['discount_total'] as num? ?? 0).toInt();
     return ReceiptDocument(
       title: 'HÓA ĐƠN BÁN HÀNG',
       code: '${sale['code']}',
@@ -4530,6 +4625,10 @@ class ReceiptDocument {
         unitPrice: (item['unit_price'] as num).toInt(),
       )).toList(),
       totals: [
+        if (discountTotal > 0) ...[
+          MapEntry('Tạm tính', vnd((sale['total'] as int) + discountTotal)),
+          MapEntry('Giảm giá', '-${vnd(discountTotal)}'),
+        ],
         MapEntry('TỔNG TIỀN', vnd(sale['total'] as int)),
         MapEntry('Tiền mặt', vnd(sale['paid_cash'] as int)),
         MapEntry('Chuyển khoản', vnd(sale['paid_transfer'] as int)),
