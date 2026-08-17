@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - agent/in-chia-se-phieu
 
 permissions:
   contents: write
@@ -55,6 +56,26 @@ jobs:
 
       - name: Generate Android project
         run: flutter create --platforms android --org vn.minhcanhmobile .
+
+      - name: Configure Android printer permissions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text(encoding='utf-8')
+          permissions = '''    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+'''
+          if 'android.permission.BLUETOOTH_CONNECT' not in text:
+              text = text.replace('<manifest xmlns:android="http://schemas.android.com/apk/res/android">',
+                                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n' + permissions)
+          manifest.write_text(text, encoding='utf-8')
+          PY
 
       - name: Install dependencies
         run: flutter pub get
