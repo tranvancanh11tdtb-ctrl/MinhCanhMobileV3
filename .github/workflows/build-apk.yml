@@ -48,8 +48,12 @@ jobs:
           git config user.name "MinhCanhMobile Builder"
           git config user.email "actions@users.noreply.github.com"
           git add lib/main.dart
-          git diff --cached --quiet || git commit -m "Fix Flutter source compatibility"
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "Fix Flutter source compatibility"
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              git push
+            fi
+          fi
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
