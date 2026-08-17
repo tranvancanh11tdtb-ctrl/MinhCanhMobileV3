@@ -3287,8 +3287,7 @@ class ReceiptDocument {
   final List<MapEntry<String, String>> totals;
   final String note;
 
-  String get fileName =>
-      '${title.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_')}_$code.pdf';
+  String get fileName => 'Phieu_$code.pdf';
 
   factory ReceiptDocument.invoice(
       Map<String, Object?> sale, List<Map<String, Object?>> rows) {
@@ -3761,7 +3760,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                         'Điện thoại phải dùng Wi-Fi cùng bộ phát mạng với máy in.'),
                     const SizedBox(height: 14),
                     TextField(controller: ip,
-                        keyboardType: TextInputType.number,
+                        keyboardType: TextInputType.url,
                         decoration: const InputDecoration(
                             labelText: 'Địa chỉ IP máy in',
                             hintText: 'Ví dụ: 192.168.1.100')),
@@ -3815,7 +3814,13 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
               onChanged: (value) => setState(() => copies = value ?? 1),
             ),
             const SizedBox(height: 20),
-            FilledButton.icon(onPressed: save,
+            FilledButton.icon(onPressed: () async {
+                try {
+                  await save();
+                } catch (e) {
+                  if (mounted) showError(context, e);
+                }
+              },
                 icon: const Icon(Icons.save),
                 label: const Text('Lưu cài đặt')),
             const SizedBox(height: 10),
