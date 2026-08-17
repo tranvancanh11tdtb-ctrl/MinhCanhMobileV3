@@ -279,7 +279,7 @@ class StoreDb {
       (SELECT GROUP_CONCAT(s.imei, ' ') FROM serial_units s
        WHERE s.product_id=p.id) AS imeis
       FROM products p
-      ${includeInactive ? '' : 'WHERE p.active=1'}
+      ${includeInactive ? 'WHERE p.active>=0' : 'WHERE p.active=1'}
       ORDER BY p.active DESC, p.id DESC''');
   }
 
@@ -342,20 +342,36 @@ class StoreDb {
 
   Future<void> deleteProduct(int id) async {
     final db = await database;
-    final used = Sqflite.firstIntValue(await db.rawQuery(
-          '''SELECT (SELECT COUNT(*) FROM purchase_items WHERE product_id=?) +
-          (SELECT COUNT(*) FROM sale_items WHERE product_id=?) +
-          (SELECT COUNT(*) FROM serial_units WHERE product_id=?) +
-          (SELECT COUNT(*) FROM inventory_movements WHERE product_id=?) +
-          (SELECT COUNT(*) FROM stocktakes WHERE product_id=?)''',
-          [id, id, id, id, id],
-        )) ??
-        0;
-    if (used > 0) {
-      throw Exception(
-          'Hàng đã có tồn kho hoặc giao dịch, chỉ có thể ngừng kinh doanh');
-    }
-    await db.delete('products', where: 'id=?', whereArgs: [id]);
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'products',
+        columns: ['id'],
+        where: 'id=?',
+        whereArgs: [id],
+      );
+      if (rows.isEmpty) throw Exception('Không tìm thấy hàng hóa');
+      final used = Sqflite.firstIntValue(await txn.rawQuery(
+            '''SELECT
+              (SELECT COUNT(*) FROM purchase_items WHERE product_id=?) +
+              (SELECT COUNT(*) FROM sale_items WHERE product_id=?) +
+              (SELECT COUNT(*) FROM serial_units WHERE product_id=?) +
+              (SELECT COUNT(*) FROM inventory_movements WHERE product_id=?) +
+              (SELECT COUNT(*) FROM stocktakes WHERE product_id=?)''',
+            [id, id, id, id, id],
+          )) ??
+          0;
+      if (used == 0) {
+        await txn.delete('products', where: 'id=?', whereArgs: [id]);
+      } else {
+        // Giữ một bản ghi ẩn để hóa đơn, công nợ và bảo hành cũ không bị sai.
+        await txn.update(
+          'products',
+          {'active': -1},
+          where: 'id=?',
+          whereArgs: [id],
+        );
+      }
+    });
   }
 
   Future<List<Map<String, Object?>>> serials(int productId,
@@ -512,47 +528,102 @@ class StoreDb {
     });
   }
 
-  Future<int> completeSale({
-    required Map<String, Object?> product,
-    required int quantity,
-    required int? serialId,
-    required int unitPrice,
-    required int discountPerItem,
+  Future<int> completeMultiSale({
+    required List<SaleLineDraft> items,
     required String customer,
     required String phone,
     required int cash,
     required int transfer,
     required int warrantyMonths,
   }) async {
+    if (items.isEmpty) throw Exception('Hãy thêm ít nhất một sản phẩm');
     final db = await database;
     return db.transaction((txn) async {
-      final productId = product['id'] as int;
-      final tracks = product['track_imei'] == 1;
-      var cost = 0;
-      if (tracks) {
-        if (serialId == null) throw Exception('Phải chọn IMEI');
-        final serialRows = await txn.query('serial_units',
+      final prepared = <Map<String, Object?>>[];
+      final requiredQuantities = <int, int>{};
+      final productStocks = <int, int>{};
+      final selectedSerials = <int>{};
+      var total = 0;
+      var discountTotal = 0;
+      var costTotal = 0;
+
+      for (final item in items) {
+        final productId = item.product['id'] as int;
+        final productRows = await txn.query(
+          'products',
+          where: 'id=? AND active=1',
+          whereArgs: [productId],
+        );
+        if (productRows.isEmpty) {
+          throw Exception(
+              'Sản phẩm ${item.product['name']} không còn kinh doanh');
+        }
+        final fresh = productRows.single;
+        final tracksImei = fresh['track_imei'] == 1;
+        if (item.unitPrice <= 0) {
+          throw Exception('Giá bán phải lớn hơn 0');
+        }
+        if (item.discountPerItem < 0 ||
+            item.discountPerItem > item.unitPrice) {
+          throw Exception(
+              'Giảm giá của ${fresh['name']} không hợp lệ');
+        }
+
+        final soldQuantity = tracksImei ? 1 : item.quantity;
+        if (soldQuantity <= 0) {
+          throw Exception('Số lượng bán phải lớn hơn 0');
+        }
+        int? serialId;
+        var unitCost = (fresh['avg_cost'] as num).toInt();
+
+        if (tracksImei) {
+          serialId = item.serialId;
+          if (serialId == null) {
+            throw Exception('Phải chọn IMEI cho ${fresh['name']}');
+          }
+          if (!selectedSerials.add(serialId)) {
+            throw Exception('Một IMEI đang được chọn hai lần');
+          }
+          final serialRows = await txn.query(
+            'serial_units',
             where: "id=? AND product_id=? AND status='in_stock'",
-            whereArgs: [serialId, productId]);
-        if (serialRows.isEmpty) throw Exception('IMEI không còn trong kho');
-        cost = serialRows.single['cost'] as int;
-      } else {
-        final fresh = (await txn.query('products', where: 'id=?', whereArgs: [productId])).single;
-        final stock = fresh['quantity'] as int;
-        if (quantity <= 0 || quantity > stock) throw Exception('Số lượng bán vượt tồn kho');
-        cost = (fresh['avg_cost'] as int) * quantity;
+            whereArgs: [serialId, productId],
+          );
+          if (serialRows.isEmpty) {
+            throw Exception('IMEI ${item.imei} không còn trong kho');
+          }
+          unitCost = (serialRows.single['cost'] as num).toInt();
+        } else {
+          requiredQuantities[productId] =
+              (requiredQuantities[productId] ?? 0) + soldQuantity;
+          productStocks[productId] = (fresh['quantity'] as num).toInt();
+        }
+
+        final netUnitPrice = item.unitPrice - item.discountPerItem;
+        total += netUnitPrice * soldQuantity;
+        discountTotal += item.discountPerItem * soldQuantity;
+        costTotal += unitCost * soldQuantity;
+        prepared.add({
+          'product_id': productId,
+          'serial_id': serialId,
+          'quantity': soldQuantity,
+          'unit_price': netUnitPrice,
+          'unit_cost': unitCost,
+        });
       }
-      if (unitPrice <= 0) throw Exception('Giá bán phải lớn hơn 0');
-      if (discountPerItem < 0 || discountPerItem > unitPrice) {
-        throw Exception('Giảm giá bán không hợp lệ');
+
+      for (final entry in requiredQuantities.entries) {
+        if (entry.value > (productStocks[entry.key] ?? 0)) {
+          throw Exception('Số lượng bán vượt tồn kho');
+        }
       }
-      final soldQuantity = tracks ? 1 : quantity;
-      final netUnitPrice = unitPrice - discountPerItem;
-      final discountTotal = discountPerItem * soldQuantity;
-      final total = netUnitPrice * soldQuantity;
       if (cash < 0 || transfer < 0 || cash + transfer > total) {
         throw Exception('Số tiền thanh toán không hợp lệ');
       }
+      if (warrantyMonths < 0) {
+        throw Exception('Số tháng bảo hành không hợp lệ');
+      }
+
       final now = DateTime.now().toIso8601String();
       await _ensureCustomer(txn, customer, phone);
       final saleId = await txn.insert('sales', {
@@ -561,37 +632,50 @@ class StoreDb {
         'phone': phone.trim(),
         'total': total,
         'discount_total': discountTotal,
-        'cost_total': cost,
+        'cost_total': costTotal,
         'paid_cash': cash,
         'paid_transfer': transfer,
         'debt': total - cash - transfer,
         'warranty_months': warrantyMonths,
         'created_at': now,
       });
-      await txn.insert('sale_items', {
-        'sale_id': saleId,
-        'product_id': productId,
-        'serial_id': serialId,
-        'quantity': tracks ? 1 : quantity,
-        'unit_price': netUnitPrice,
-        'unit_cost': tracks ? cost : (product['avg_cost'] as int),
-      });
-      if (tracks) {
-        await txn.update('serial_units', {'status': 'sold'},
-            where: 'id=?', whereArgs: [serialId]);
-      } else {
-        await txn.rawUpdate('UPDATE products SET quantity=quantity-? WHERE id=?',
-            [quantity, productId]);
+
+      for (final item in prepared) {
+        final productId = item['product_id'] as int;
+        final serialId = item['serial_id'] as int?;
+        final soldQuantity = item['quantity'] as int;
+        await txn.insert('sale_items', {
+          'sale_id': saleId,
+          ...item,
+        });
+        if (serialId != null) {
+          final changed = await txn.update(
+            'serial_units',
+            {'status': 'sold'},
+            where: "id=? AND status='in_stock'",
+            whereArgs: [serialId],
+          );
+          if (changed == 0) throw Exception('IMEI không còn trong kho');
+        } else {
+          final changed = await txn.rawUpdate(
+            '''UPDATE products SET quantity=quantity-?
+               WHERE id=? AND quantity>=?''',
+            [soldQuantity, productId, soldQuantity],
+          );
+          if (changed == 0) {
+            throw Exception('Số lượng bán vượt tồn kho');
+          }
+        }
+        await txn.insert('inventory_movements', {
+          'product_id': productId,
+          'serial_id': serialId,
+          'kind': 'sale',
+          'quantity_delta': -soldQuantity,
+          'reference_type': 'sale',
+          'reference_id': saleId,
+          'created_at': now,
+        });
       }
-      await txn.insert('inventory_movements', {
-        'product_id': productId,
-        'serial_id': serialId,
-        'kind': 'sale',
-        'quantity_delta': tracks ? -1 : -quantity,
-        'reference_type': 'sale',
-        'reference_id': saleId,
-        'created_at': now,
-      });
       return saleId;
     });
   }
@@ -1382,8 +1466,11 @@ class StoreDb {
       COALESCE(SUM(amount_delta),0) amount
       FROM debt_adjustments WHERE party_type='customer' ''');
     final stockRows = await db.rawQuery('''SELECT
-      COALESCE((SELECT SUM(quantity*avg_cost) FROM products WHERE track_imei=0),0) +
-      COALESCE((SELECT SUM(cost) FROM serial_units WHERE status='in_stock'),0) stock_value''');
+      COALESCE((SELECT SUM(quantity*avg_cost) FROM products
+        WHERE track_imei=0 AND active>=0),0) +
+      COALESCE((SELECT SUM(su.cost) FROM serial_units su
+        JOIN products p ON p.id=su.product_id
+        WHERE su.status='in_stock' AND p.active>=0),0) stock_value''');
     int n(Map<String, Object?> row, String key) => (row[key] as num? ?? 0).toInt();
     final sale = salesRows.single;
     final repair = repairRows.single;
@@ -1407,6 +1494,32 @@ class SerialDraft {
   String color;
   String conditionText;
   int cost;
+}
+
+class SaleLineDraft {
+  SaleLineDraft({
+    required this.product,
+    required this.quantity,
+    required this.unitPrice,
+    required this.discountPerItem,
+    this.serialId,
+    this.imei = '',
+    this.color = '',
+  });
+
+  final Map<String, Object?> product;
+  int quantity;
+  final int unitPrice;
+  final int discountPerItem;
+  final int? serialId;
+  final String imei;
+  final String color;
+
+  bool get tracksImei => product['track_imei'] == 1;
+  int get soldQuantity => tracksImei ? 1 : quantity;
+  int get netUnitPrice => unitPrice - discountPerItem;
+  int get total => soldQuantity * netUnitPrice;
+  int get discountTotal => soldQuantity * discountPerItem;
 }
 
 class PinGate extends StatefulWidget {
@@ -2129,9 +2242,10 @@ class _ProductDetailState extends State<ProductDetail> {
   Future<void> delete() async {
     final accepted = await confirm(
       context,
-      'Xóa hàng hóa',
-      'Chỉ hàng chưa có tồn kho hoặc giao dịch mới xóa được. '
-          'Bạn có chắc chắn muốn xóa hàng hóa này không?',
+      'Xóa hẳn hàng hóa',
+      'Hàng hóa sẽ biến mất khỏi danh sách và không còn tính vào tồn kho. '
+          'Hóa đơn, công nợ và bảo hành cũ vẫn được giữ nguyên để số liệu '
+          'không bị sai. Tiếp tục?',
     );
     if (!accepted) return;
     try {
@@ -2142,6 +2256,7 @@ class _ProductDetailState extends State<ProductDetail> {
       if (mounted) showError(context, e);
     }
   }
+
 }
 
 class ProductEditForm extends StatefulWidget {
@@ -2770,6 +2885,7 @@ class SerialEditor extends StatelessWidget {
 class SalePage extends StatefulWidget {
   const SalePage({super.key, required this.onChanged});
   final VoidCallback onChanged;
+
   @override
   State<SalePage> createState() => _SalePageState();
 }
@@ -2785,6 +2901,7 @@ class _SalePageState extends State<SalePage> {
   final cash = TextEditingController();
   final transfer = TextEditingController();
   final customWarranty = TextEditingController();
+  final cart = <SaleLineDraft>[];
   List<Map<String, Object?>> customers = [];
   int selectedCustomerId = 0;
   int warranty = 0;
@@ -2808,27 +2925,41 @@ class _SalePageState extends State<SalePage> {
     super.dispose();
   }
 
-  int get saleQuantity => product?['track_imei'] == 1 ? 1 : quantity;
+  int get draftQuantity => product?['track_imei'] == 1 ? 1 : quantity;
   int get listedUnitPrice => int.tryParse(price.text) ?? 0;
   int get discountPerItem => int.tryParse(saleDiscount.text) ?? 0;
   int get netSalePrice => listedUnitPrice >= discountPerItem
-      ? listedUnitPrice - discountPerItem : 0;
-  int get saleTotal => saleQuantity * netSalePrice;
+      ? listedUnitPrice - discountPerItem
+      : 0;
+  int get draftTotal => draftQuantity * netSalePrice;
+  int get cartQuantity =>
+      cart.fold(0, (sum, item) => sum + item.soldQuantity);
+  int get cartTotal => cart.fold(0, (sum, item) => sum + item.total);
+  int get cartDiscount =>
+      cart.fold(0, (sum, item) => sum + item.discountTotal);
   int get customerDebt {
-    final value = saleTotal - (int.tryParse(cash.text) ?? 0)
-        - (int.tryParse(transfer.text) ?? 0);
+    final value = cartTotal - (int.tryParse(cash.text) ?? 0) -
+        (int.tryParse(transfer.text) ?? 0);
     return value < 0 ? 0 : value;
   }
 
-  Widget _saleSummaryRow(String label, String value, {bool strong = false}) =>
+  Widget _saleSummaryRow(String label, String value,
+          {bool strong = false}) =>
       Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Row(children: [
-          Expanded(child: Text(label,
-              style: TextStyle(fontWeight:
-                  strong ? FontWeight.bold : FontWeight.w500))),
-          Text(value, style: TextStyle(fontSize: 16,
-              fontWeight: strong ? FontWeight.bold : FontWeight.w500)),
+          Expanded(child: Text(
+            label,
+            style: TextStyle(
+                fontWeight: strong ? FontWeight.bold : FontWeight.w500),
+          )),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: strong ? FontWeight.bold : FontWeight.w500,
+            ),
+          ),
         ]),
       );
 
@@ -2851,8 +2982,10 @@ class _SalePageState extends State<SalePage> {
   Future<void> _pickCustomer(int? id) async {
     if (id == null) return;
     if (id == -1) {
-      final created = await Navigator.push<Map<String, Object?>>(context,
-          MaterialPageRoute(builder: (_) => const CustomerFormPage()));
+      final created = await Navigator.push<Map<String, Object?>>(
+        context,
+        MaterialPageRoute(builder: (_) => const CustomerFormPage()),
+      );
       if (created != null) {
         await _loadCustomers(selectId: created['id'] as int);
       }
@@ -2861,131 +2994,502 @@ class _SalePageState extends State<SalePage> {
     setState(() {
       selectedCustomerId = id;
       final selected = customers.where((row) => row['id'] == id);
-      customer.text = id == 0 || selected.isEmpty
-          ? '' : '${selected.first['name']}';
-      phone.text = id == 0 || selected.isEmpty
-          ? '' : '${selected.first['phone']}';
+      customer.text =
+          id == 0 || selected.isEmpty ? '' : '${selected.first['name']}';
+      phone.text =
+          id == 0 || selected.isEmpty ? '' : '${selected.first['phone']}';
+    });
+  }
+
+  Future<void> _pickProduct(
+      List<Map<String, Object?>> products) async {
+    if (products.isEmpty) {
+      showError(context, 'Không có sản phẩm còn tồn kho');
+      return;
+    }
+    final selected = await showModalBottomSheet<Map<String, Object?>>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => ProductSearchSheet(
+        products: products,
+        selectedId: product?['id'] as int?,
+      ),
+    );
+    if (selected == null || !mounted) return;
+    setState(() {
+      product = selected;
+      serialId = null;
+      quantity = 1;
+      price.text = '${selected['sale_price']}';
+      saleDiscount.text = '0';
+    });
+  }
+
+  Future<void> addItem() async {
+    final selectedProduct = product;
+    if (selectedProduct == null) {
+      showError(context, 'Hãy chọn sản phẩm cần thêm');
+      return;
+    }
+    if (listedUnitPrice <= 0) {
+      showError(context, 'Giá bán phải lớn hơn 0');
+      return;
+    }
+    if (discountPerItem < 0 || discountPerItem > listedUnitPrice) {
+      showError(context, 'Giảm giá không được lớn hơn giá bán');
+      return;
+    }
+
+    final productId = selectedProduct['id'] as int;
+    final tracksImei = selectedProduct['track_imei'] == 1;
+    var imei = '';
+    var color = '';
+
+    if (tracksImei) {
+      if (serialId == null) {
+        showError(context, 'Hãy chọn IMEI');
+        return;
+      }
+      if (cart.any((item) => item.serialId == serialId)) {
+        showError(context, 'IMEI này đã có trong hóa đơn');
+        return;
+      }
+      final serialRows = await StoreDb.instance.serials(
+        productId,
+        status: 'in_stock',
+      );
+      final selected =
+          serialRows.where((row) => row['id'] == serialId).toList();
+      if (selected.isEmpty) {
+        if (mounted) showError(context, 'IMEI không còn trong kho');
+        return;
+      }
+      imei = '${selected.single['imei']}';
+      color = '${selected.single['color']}';
+    } else {
+      if (quantity <= 0) {
+        showError(context, 'Số lượng phải lớn hơn 0');
+        return;
+      }
+      final alreadyAdded = cart
+          .where((item) =>
+              item.serialId == null &&
+              item.product['id'] == productId)
+          .fold<int>(0, (sum, item) => sum + item.quantity);
+      final stock = (selectedProduct['stock'] as num).toInt();
+      if (alreadyAdded + quantity > stock) {
+        showError(context, 'Tổng số lượng trong hóa đơn vượt tồn kho');
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      if (!tracksImei) {
+        final sameLine = cart.where((item) =>
+            item.serialId == null &&
+            item.product['id'] == productId &&
+            item.unitPrice == listedUnitPrice &&
+            item.discountPerItem == discountPerItem);
+        if (sameLine.isNotEmpty) {
+          sameLine.first.quantity += quantity;
+        } else {
+          cart.add(SaleLineDraft(
+            product: selectedProduct,
+            quantity: quantity,
+            unitPrice: listedUnitPrice,
+            discountPerItem: discountPerItem,
+          ));
+        }
+      } else {
+        cart.add(SaleLineDraft(
+          product: selectedProduct,
+          quantity: 1,
+          serialId: serialId,
+          imei: imei,
+          color: color,
+          unitPrice: listedUnitPrice,
+          discountPerItem: discountPerItem,
+        ));
+      }
+      product = null;
+      serialId = null;
+      quantity = 1;
+      price.clear();
+      saleDiscount.text = '0';
     });
   }
 
   @override
   Widget build(BuildContext context) => Column(children: [
     const PageHeader('Bán hàng'),
-    Expanded(child: FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.products(), builder: (context, snap) {
-      final products = (snap.data ?? []).where((p) => (p['stock'] as int) > 0).toList();
-      return ListView(padding: const EdgeInsets.all(16), children: [
-        DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn hàng còn tồn'), initialValue: product?['id'] as int?, items: products.map((p) => DropdownMenuItem(value: p['id'] as int, child: Text('${p['name']} • tồn ${p['stock']}'))).toList(), onChanged: (id) => setState(() { product = products.firstWhere((p) => p['id'] == id); serialId = null; quantity = 1; price.text = '${product!['sale_price']}'; saleDiscount.text = '0'; })),
-        if (product?['track_imei'] == 1) FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.serials(product!['id'] as int, status: 'in_stock'), builder: (context, ss) => Padding(padding: const EdgeInsets.only(top: 12), child: DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn IMEI *'), initialValue: serialId, items: (ss.data ?? []).map((s) => DropdownMenuItem(value: s['id'] as int, child: Text('${s['imei']} • ${s['color']}'))).toList(), onChanged: (v) => setState(() => serialId = v))))
-        else if (product != null) Padding(padding: const EdgeInsets.only(top: 12), child: TextFormField(initialValue: '1', keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.digitsOnly], decoration: const InputDecoration(labelText: 'Số lượng'), onChanged: (v) => setState(() => quantity = int.tryParse(v) ?? 0))),
-        const SizedBox(height: 12),
-        TextField(controller: price, keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(labelText: 'Giá bán *'),
-            onChanged: (_) => setState(() {})),
-        const SizedBox(height: 12),
-        TextField(controller: saleDiscount, keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(
-                labelText: 'Giảm giá trên mỗi sản phẩm'),
-            onChanged: (_) => setState(() {})),
-        if (product != null) ...[
-          const SizedBox(height: 12),
-          Card(color: const Color(0xFFF5F7FA), child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(children: [
-              _saleSummaryRow('Số lượng bán', '$saleQuantity'),
-              _saleSummaryRow('Giá bán', vnd(listedUnitPrice)),
-              _saleSummaryRow('Giảm giá', vnd(discountPerItem)),
-              _saleSummaryRow('Giá sau giảm', vnd(netSalePrice), strong: true),
-              _saleSummaryRow('Khách phải trả', vnd(saleTotal), strong: true),
-            ]),
-          )),
-        ],
-        const SizedBox(height: 12),
-        DropdownButtonFormField<int>(
-          key: ValueKey('customer-$selectedCustomerId-${customers.length}'),
-          initialValue: selectedCustomerId,
-          isExpanded: true,
-          decoration: const InputDecoration(
-              labelText: 'Khách hàng', prefixIcon: Icon(Icons.person)),
-          items: [
-            const DropdownMenuItem(value: 0, child: Text('Khách lẻ')),
-            ...customers.map((row) => DropdownMenuItem(
-                value: row['id'] as int,
-                child: Text('${row['name']}${'${row['phone']}'.trim().isEmpty ? '' : ' • ${row['phone']}'}'))),
-            const DropdownMenuItem(value: -1,
-                child: Text('+ Thêm khách hàng mới')),
+    Expanded(child: FutureBuilder<List<Map<String, Object?>>>(
+      future: StoreDb.instance.products(),
+      builder: (context, snap) {
+        final products = (snap.data ?? [])
+            .where((p) => (p['stock'] as num).toInt() > 0)
+            .toList();
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Card(child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'Thêm sản phẩm vào hóa đơn',
+                    style:
+                        TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const CircleAvatar(child: Icon(Icons.search)),
+                    title: Text(
+                      product == null
+                          ? 'Chọn sản phẩm'
+                          : '${product!['name']}',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: Text(product == null
+                        ? 'Tìm theo tên, mã, hãng hoặc dung lượng'
+                        : '${product!['code']} • Tồn: ${product!['stock']}'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => _pickProduct(products),
+                  ),
+                  if (product?['track_imei'] == 1)
+                    FutureBuilder<List<Map<String, Object?>>>(
+                      future: StoreDb.instance.serials(
+                        product!['id'] as int,
+                        status: 'in_stock',
+                      ),
+                      builder: (context, serialSnapshot) {
+                        final rows = (serialSnapshot.data ?? []).where((row) =>
+                            !cart.any((item) =>
+                                item.serialId == row['id'])).toList();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: DropdownButtonFormField<int>(
+                            key: ValueKey(
+                                'imei-${product!['id']}-${cart.length}'),
+                            initialValue: serialId,
+                            isExpanded: true,
+                            decoration: const InputDecoration(
+                              labelText: 'Chọn IMEI *',
+                            ),
+                            items: rows.map((serial) => DropdownMenuItem(
+                              value: serial['id'] as int,
+                              child: Text(
+                                '${serial['imei']} • ${serial['color']}',
+                              ),
+                            )).toList(),
+                            onChanged: (value) =>
+                                setState(() => serialId = value),
+                          ),
+                        );
+                      },
+                    )
+                  else if (product != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: TextFormField(
+                        key: ValueKey('sale-quantity-${product!['id']}'),
+                        initialValue: '1',
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        decoration:
+                            const InputDecoration(labelText: 'Số lượng'),
+                        onChanged: (value) => setState(
+                            () => quantity = int.tryParse(value) ?? 0),
+                      ),
+                    ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: price,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [
+                      FilteringTextInputFormatter.digitsOnly,
+                    ],
+                    decoration:
+                        const InputDecoration(labelText: 'Giá bán *'),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: saleDiscount,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [
+                      FilteringTextInputFormatter.digitsOnly,
+                    ],
+                    decoration: const InputDecoration(
+                      labelText: 'Giảm giá trên mỗi sản phẩm',
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  if (product != null) ...[
+                    const SizedBox(height: 10),
+                    _saleSummaryRow(
+                        'Giá sau giảm', vnd(netSalePrice)),
+                    _saleSummaryRow(
+                        'Thành tiền', vnd(draftTotal), strong: true),
+                  ],
+                  const SizedBox(height: 10),
+                  FilledButton.tonalIcon(
+                    onPressed: product == null ? null : addItem,
+                    icon: const Icon(Icons.add_shopping_cart),
+                    label: const Text('Thêm vào hóa đơn'),
+                  ),
+                ],
+              ),
+            )),
+            const SizedBox(height: 16),
+            Text(
+              'Sản phẩm trong hóa đơn (${cart.length})',
+              style:
+                  const TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            if (cart.isEmpty)
+              const Card(child: Padding(
+                padding: EdgeInsets.all(18),
+                child: Text(
+                  'Chưa có sản phẩm. Hãy chọn hàng và bấm '
+                  '“Thêm vào hóa đơn”.',
+                  textAlign: TextAlign.center,
+                ),
+              ))
+            else
+              ...cart.asMap().entries.map((entry) {
+                final index = entry.key;
+                final item = entry.value;
+                final details = item.tracksImei
+                    ? 'IMEI: ${item.imei}'
+                        '${item.color.trim().isEmpty ? '' : ' • ${item.color}'}'
+                    : 'Số lượng: ${item.quantity}';
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Card(child: ListTile(
+                    leading: CircleAvatar(child: Text('${index + 1}')),
+                    title: Text(
+                      '${item.product['name']}',
+                      style:
+                          const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: Text(
+                      '$details\n'
+                      'Giá: ${vnd(item.unitPrice)}'
+                      '${item.discountPerItem > 0 ? ' • Giảm: ${vnd(item.discountPerItem)}' : ''}',
+                    ),
+                    isThreeLine: true,
+                    trailing: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          vnd(item.total),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold),
+                        ),
+                        InkWell(
+                          onTap: () => setState(() => cart.removeAt(index)),
+                          child: const Padding(
+                            padding: EdgeInsets.only(top: 5),
+                            child: Icon(Icons.delete_outline,
+                                color: Colors.red, size: 21),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )),
+                );
+              }),
+            const SizedBox(height: 10),
+            Card(
+              color: const Color(0xFFF5F7FA),
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(children: [
+                  _saleSummaryRow(
+                      'Tổng số lượng', '$cartQuantity sản phẩm'),
+                  if (cartDiscount > 0)
+                    _saleSummaryRow(
+                        'Tổng giảm giá', '-${vnd(cartDiscount)}'),
+                  _saleSummaryRow(
+                      'Khách phải trả', vnd(cartTotal), strong: true),
+                ]),
+              ),
+            ),
+            const SizedBox(height: 14),
+            DropdownButtonFormField<int>(
+              key:
+                  ValueKey('customer-$selectedCustomerId-${customers.length}'),
+              initialValue: selectedCustomerId,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Khách hàng',
+                prefixIcon: Icon(Icons.person),
+              ),
+              items: [
+                const DropdownMenuItem(
+                    value: 0, child: Text('Khách lẻ')),
+                ...customers.map((row) => DropdownMenuItem(
+                  value: row['id'] as int,
+                  child: Text(
+                    '${row['name']}'
+                    '${'${row['phone']}'.trim().isEmpty ? '' : ' • ${row['phone']}'}',
+                  ),
+                )),
+                const DropdownMenuItem(
+                  value: -1,
+                  child: Text('+ Thêm khách hàng mới'),
+                ),
+              ],
+              onChanged: _pickCustomer,
+            ),
+            if (selectedCustomerId > 0) ...[
+              const SizedBox(height: 8),
+              Text(
+                'SĐT: ${phone.text.trim().isEmpty ? 'Không ghi' : phone.text}',
+                style: const TextStyle(color: Colors.black54),
+              ),
+            ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: cash,
+              keyboardType: TextInputType.number,
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+              ],
+              decoration:
+                  const InputDecoration(labelText: 'Tiền mặt'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: transfer,
+              keyboardType: TextInputType.number,
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+              ],
+              decoration: InputDecoration(
+                labelText: 'Chuyển khoản',
+                helperText: 'Khách còn nợ: ${vnd(customerDebt)}',
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Phần tiền còn lại sau tiền mặt và chuyển khoản '
+              'sẽ tự ghi là khách nợ.',
+              style: TextStyle(color: Colors.black54),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(
+              initialValue: warranty,
+              decoration:
+                  const InputDecoration(labelText: 'Thời hạn bảo hành'),
+              items: const [
+                DropdownMenuItem(
+                    value: 0, child: Text('Không bảo hành')),
+                DropdownMenuItem(value: 3, child: Text('3 tháng')),
+                DropdownMenuItem(value: 6, child: Text('6 tháng')),
+                DropdownMenuItem(value: 9, child: Text('9 tháng')),
+                DropdownMenuItem(
+                    value: 12, child: Text('12 tháng / 1 năm')),
+                DropdownMenuItem(value: 24, child: Text('2 năm')),
+                DropdownMenuItem(
+                    value: -1, child: Text('Tự nhập số tháng')),
+              ],
+              onChanged: (value) =>
+                  setState(() => warranty = value ?? 0),
+            ),
+            if (warranty == -1) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: customWarranty,
+                keyboardType: TextInputType.number,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                ],
+                decoration: const InputDecoration(
+                    labelText: 'Số tháng bảo hành *'),
+              ),
+            ],
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: saving || cart.isEmpty ? null : complete,
+              icon: const Icon(Icons.shopping_cart_checkout),
+              label: Text(cart.isEmpty
+                  ? 'Hãy thêm sản phẩm'
+                  : 'Hoàn tất hóa đơn ${vnd(cartTotal)}'),
+            ),
           ],
-          onChanged: _pickCustomer,
-        ),
-        if (selectedCustomerId > 0) ...[
-          const SizedBox(height: 8),
-          Text('SĐT: ${phone.text.trim().isEmpty ? 'Không ghi' : phone.text}',
-              style: const TextStyle(color: Colors.black54)),
-        ],
-        const SizedBox(height: 12),
-        TextField(controller: cash, keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(labelText: 'Tiền mặt'),
-            onChanged: (_) => setState(() {})),
-        const SizedBox(height: 12),
-        TextField(controller: transfer, keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: InputDecoration(labelText: 'Chuyển khoản',
-                helperText: 'Khách còn nợ: ${vnd(customerDebt)}'),
-            onChanged: (_) => setState(() {})),
-        const SizedBox(height: 12),
-        const Text('Phần tiền còn lại sau tiền mặt và chuyển khoản sẽ tự ghi là khách nợ.',
-            style: TextStyle(color: Colors.black54)),
-        const SizedBox(height: 12),
-        DropdownButtonFormField<int>(
-          initialValue: warranty,
-          decoration: const InputDecoration(labelText: 'Thời hạn bảo hành'),
-          items: const [
-            DropdownMenuItem(value: 0, child: Text('Không bảo hành')),
-            DropdownMenuItem(value: 3, child: Text('3 tháng')),
-            DropdownMenuItem(value: 6, child: Text('6 tháng')),
-            DropdownMenuItem(value: 9, child: Text('9 tháng')),
-            DropdownMenuItem(value: 12, child: Text('12 tháng / 1 năm')),
-            DropdownMenuItem(value: 24, child: Text('2 năm')),
-            DropdownMenuItem(value: -1, child: Text('Tự nhập số tháng')),
-          ],
-          onChanged: (v) => setState(() => warranty = v ?? 0),
-        ),
-        if (warranty == -1) ...[
-          const SizedBox(height: 12),
-          TextField(controller: customWarranty, keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Số tháng bảo hành *')),
-        ],
-        const SizedBox(height: 20),
-        FilledButton.icon(onPressed: saving ? null : complete, icon: const Icon(Icons.shopping_cart_checkout), label: const Text('Hoàn tất bán hàng')),
-      ]);
-    })),
+        );
+      },
+    )),
   ]);
 
   Future<void> complete() async {
-    if (product == null) return showError(context, 'Hãy chọn sản phẩm');
-    if (listedUnitPrice <= 0) return showError(context, 'Giá bán phải lớn hơn 0');
-    if (discountPerItem < 0 || discountPerItem > listedUnitPrice) {
-      return showError(context, 'Giảm giá không được lớn hơn giá bán');
+    if (cart.isEmpty) {
+      showError(context, 'Hãy thêm ít nhất một sản phẩm');
+      return;
     }
-    final warrantyMonths = warranty == -1 ? (int.tryParse(customWarranty.text) ?? -1) : warranty;
-    if (warrantyMonths < 0) return showError(context, 'Số tháng bảo hành không hợp lệ');
+    final warrantyMonths = warranty == -1
+        ? (int.tryParse(customWarranty.text) ?? -1)
+        : warranty;
+    if (warrantyMonths < 0) {
+      showError(context, 'Số tháng bảo hành không hợp lệ');
+      return;
+    }
+    final cashValue = int.tryParse(cash.text) ?? 0;
+    final transferValue = int.tryParse(transfer.text) ?? 0;
+    if (cashValue + transferValue > cartTotal) {
+      showError(context, 'Số tiền thanh toán vượt tổng hóa đơn');
+      return;
+    }
+
     setState(() => saving = true);
     try {
-      await StoreDb.instance.completeSale(product: product!, quantity: quantity,
-          serialId: serialId, unitPrice: listedUnitPrice,
-          discountPerItem: discountPerItem, customer: customer.text,
-          phone: phone.text, cash: int.tryParse(cash.text) ?? 0,
-          transfer: int.tryParse(transfer.text) ?? 0,
-          warrantyMonths: warrantyMonths);
-      customer.clear(); phone.clear(); cash.clear(); transfer.clear(); price.clear();
-      saleDiscount.text = '0'; customWarranty.clear();
-      setState(() { product = null; serialId = null; quantity = 1;
-        warranty = 0; selectedCustomerId = 0; saving = false; });
+      await StoreDb.instance.completeMultiSale(
+        items: List<SaleLineDraft>.from(cart),
+        customer: customer.text,
+        phone: phone.text,
+        cash: cashValue,
+        transfer: transferValue,
+        warrantyMonths: warrantyMonths,
+      );
+      customer.clear();
+      phone.clear();
+      cash.clear();
+      transfer.clear();
+      price.clear();
+      saleDiscount.text = '0';
+      customWarranty.clear();
+      setState(() {
+        cart.clear();
+        product = null;
+        serialId = null;
+        quantity = 1;
+        warranty = 0;
+        selectedCustomerId = 0;
+        saving = false;
+      });
       widget.onChanged();
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Đã tạo hóa đơn')));
-    } catch (e) { showError(context, e); setState(() => saving = false); }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đã tạo hóa đơn nhiều sản phẩm')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        showError(context, e);
+        setState(() => saving = false);
+      }
+    }
   }
 }
 
