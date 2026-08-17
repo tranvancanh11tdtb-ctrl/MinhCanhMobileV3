@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cross_file/cross_file.dart';
+import 'package:barcode_widget/barcode_widget.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,6 +16,9 @@ import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:screenshot/screenshot.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
+
+import 'scanner_page.dart';
+import 'vietqr.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -60,7 +64,7 @@ class StoreDb {
 
   Future<Database> _open() async {
     final file = p.join(await getDatabasesPath(), 'minh_canh_mobile_v3.db');
-    return openDatabase(file, version: 5, onConfigure: (db) async {
+    return openDatabase(file, version: 6, onConfigure: (db) async {
       await db.execute('PRAGMA foreign_keys = ON');
     }, onCreate: (db, version) async {
       await db.execute('''CREATE TABLE products(
@@ -148,11 +152,13 @@ class StoreDb {
       await _createV3Tables(db);
       await _createV4Tables(db);
       await _createV5Tables(db);
+      await _createV6Tables(db);
     }, onUpgrade: (db, oldVersion, newVersion) async {
       if (oldVersion < 2) await _createV2Tables(db);
       if (oldVersion < 3) await _createV3Tables(db);
       if (oldVersion < 4) await _createV4Tables(db);
       if (oldVersion < 5) await _createV5Tables(db);
+      if (oldVersion < 6) await _createV6Tables(db);
     });
   }
 
@@ -260,6 +266,32 @@ class StoreDb {
     }
   }
 
+  Future<void> _createV6Tables(DatabaseExecutor db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS product_categories(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      created_at TEXT NOT NULL
+    )''');
+    final now = DateTime.now().toIso8601String();
+    for (final name in const [
+      'Điện thoại',
+      'iPhone',
+      'Samsung',
+      'Củ sạc',
+      'Cáp sạc',
+      'Phụ kiện',
+    ]) {
+      await db.insert(
+        'product_categories',
+        {'name': name, 'created_at': now},
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    }
+    await db.rawInsert('''INSERT OR IGNORE INTO product_categories(name, created_at)
+      SELECT DISTINCT TRIM(category), ? FROM products
+      WHERE LENGTH(TRIM(category))>0''', [now]);
+  }
+
   Future<void> _backfillDirectories(DatabaseExecutor db) async {
     await db.rawInsert('''INSERT OR IGNORE INTO customer_directory
       (name, phone, note, created_at, updated_at)
@@ -279,6 +311,75 @@ class StoreDb {
       GROUP BY LOWER(TRIM(supplier))''');
   }
 
+  Future<List<Map<String, Object?>>> productCategories() async {
+    final db = await database;
+    return db.rawQuery('''SELECT c.*,
+      (SELECT COUNT(*) FROM products p
+       WHERE LOWER(TRIM(p.category))=LOWER(TRIM(c.name)) AND p.active>=0)
+       product_count
+      FROM product_categories c
+      ORDER BY c.name COLLATE NOCASE''');
+  }
+
+  Future<String> addProductCategory(String rawName) async {
+    final name = rawName.trim();
+    if (name.isEmpty) throw Exception('Tên phân loại không được để trống');
+    final db = await database;
+    await db.insert(
+      'product_categories',
+      {'name': name, 'created_at': DateTime.now().toIso8601String()},
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+    final rows = await db.query('product_categories',
+        columns: ['name'], where: 'LOWER(name)=LOWER(?)', whereArgs: [name]);
+    return '${rows.single['name']}';
+  }
+
+  Future<void> renameProductCategory(int id, String rawName) async {
+    final name = rawName.trim();
+    if (name.isEmpty) throw Exception('Tên phân loại không được để trống');
+    final db = await database;
+    await db.transaction((txn) async {
+      final rows = await txn.query('product_categories',
+          columns: ['name'], where: 'id=?', whereArgs: [id]);
+      if (rows.isEmpty) throw Exception('Không tìm thấy phân loại');
+      final oldName = '${rows.single['name']}';
+      await txn.update('product_categories', {'name': name},
+          where: 'id=?', whereArgs: [id]);
+      await txn.update('products', {'category': name},
+          where: 'LOWER(TRIM(category))=LOWER(TRIM(?))',
+          whereArgs: [oldName]);
+    });
+  }
+
+  Future<void> deleteProductCategory(int id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final rows = await txn.query('product_categories',
+          columns: ['name'], where: 'id=?', whereArgs: [id]);
+      if (rows.isEmpty) throw Exception('Không tìm thấy phân loại');
+      final name = '${rows.single['name']}';
+      final used = Sqflite.firstIntValue(await txn.rawQuery(
+            '''SELECT COUNT(*) FROM products
+               WHERE active>=0 AND LOWER(TRIM(category))=LOWER(TRIM(?))''',
+            [name],
+          )) ??
+          0;
+      if (used > 0) {
+        throw Exception('Phân loại đang có $used hàng hóa nên chưa thể xóa');
+      }
+      await txn.delete('product_categories', where: 'id=?', whereArgs: [id]);
+    });
+  }
+
+  Future<String> nextProductCode() async {
+    final db = await database;
+    final value = Sqflite.firstIntValue(await db.rawQuery('''SELECT
+      COALESCE(MAX(CAST(SUBSTR(code, 3) AS INTEGER)), 0)
+      FROM products WHERE code GLOB 'SP[0-9]*' ''')) ?? 0;
+    return 'SP${(value + 1).toString().padLeft(6, '0')}';
+  }
+
   Future<List<Map<String, Object?>>> products(
       {bool includeInactive = false}) async {
     final db = await database;
@@ -288,6 +389,8 @@ class StoreDb {
       ELSE p.quantity END AS stock,
       (SELECT GROUP_CONCAT(s.imei, ' ') FROM serial_units s
        WHERE s.product_id=p.id) AS imeis
+      ,(SELECT GROUP_CONCAT(s.imei, ' ') FROM serial_units s
+       WHERE s.product_id=p.id AND s.status='in_stock') AS stock_imeis
       FROM products p
       ${includeInactive ? 'WHERE p.active>=0' : 'WHERE p.active=1'}
       ORDER BY p.active DESC, p.id DESC''');
@@ -302,6 +405,8 @@ class StoreDb {
       ELSE p.quantity END AS stock,
       (SELECT GROUP_CONCAT(s.imei, ' ') FROM serial_units s
        WHERE s.product_id=p.id) AS imeis
+      ,(SELECT GROUP_CONCAT(s.imei, ' ') FROM serial_units s
+       WHERE s.product_id=p.id AND s.status='in_stock') AS stock_imeis
       FROM products p WHERE p.id=?''', [id]);
     if (rows.isEmpty) throw Exception('Không tìm thấy hàng hóa');
     return rows.single;
@@ -316,13 +421,14 @@ class StoreDb {
     required int id,
     required String code,
     required String name,
+    required String category,
     required String brand,
     required String capacity,
     required int salePrice,
     int? averageCost,
   }) async {
-    if (code.trim().isEmpty || name.trim().isEmpty) {
-      throw Exception('Mã hàng và tên hàng không được để trống');
+    if (code.trim().isEmpty || name.trim().isEmpty || category.trim().isEmpty) {
+      throw Exception('Mã hàng, tên hàng và phân loại không được để trống');
     }
     if (salePrice < 0 || (averageCost != null && averageCost < 0)) {
       throw Exception('Giá bán và giá nhập không được là số âm');
@@ -331,6 +437,7 @@ class StoreDb {
     final values = <String, Object?>{
       'code': code.trim(),
       'name': name.trim(),
+      'category': category.trim(),
       'brand': brand.trim(),
       'capacity': capacity.trim(),
       'sale_price': salePrice,
@@ -391,6 +498,16 @@ class StoreDb {
         where: status == null ? 'product_id=?' : 'product_id=? AND status=?',
         whereArgs: status == null ? [productId] : [productId, status],
         orderBy: 'id DESC');
+  }
+
+  Future<bool> serialExists(String imei) async {
+    final db = await database;
+    final count = Sqflite.firstIntValue(await db.rawQuery(
+          'SELECT COUNT(*) FROM serial_units WHERE imei=?',
+          [imei.trim()],
+        )) ??
+        0;
+    return count > 0;
   }
 
   Future<void> updateSerialUnit({
@@ -469,6 +586,23 @@ class StoreDb {
       if (tracks && serials.length != quantity) {
         throw Exception('Số IMEI phải đúng bằng số lượng nhập');
       }
+      if (tracks) {
+        final normalized = serials.map((item) => item.imei.trim()).toList();
+        if (normalized.any((imei) => !isValidImei(imei))) {
+          throw Exception('IMEI phải đủ 15 số và đúng mã kiểm tra');
+        }
+        if (normalized.toSet().length != normalized.length) {
+          throw Exception('Danh sách nhập đang có IMEI trùng nhau');
+        }
+        final placeholders = List.filled(normalized.length, '?').join(',');
+        final existed = await txn.rawQuery(
+          'SELECT imei FROM serial_units WHERE imei IN ($placeholders)',
+          normalized,
+        );
+        if (existed.isNotEmpty) {
+          throw Exception('IMEI ${existed.first['imei']} đã có trong kho/lịch sử');
+        }
+      }
       if (unitCost < 0 || serials.any((serial) => serial.cost < 0)) {
         throw Exception('Giá nhập không hợp lệ');
       }
@@ -539,6 +673,7 @@ class StoreDb {
   }
 
   Future<int> completeMultiSale({
+    required String invoiceCode,
     required List<SaleLineDraft> items,
     required String customer,
     required String phone,
@@ -637,7 +772,7 @@ class StoreDb {
       final now = DateTime.now().toIso8601String();
       await _ensureCustomer(txn, customer, phone);
       final saleId = await txn.insert('sales', {
-        'code': 'HD${DateTime.now().millisecondsSinceEpoch}',
+        'code': invoiceCode,
         'customer': customer.trim().isEmpty ? 'Khách lẻ' : customer.trim(),
         'phone': phone.trim(),
         'total': total,
@@ -1376,11 +1511,12 @@ class StoreDb {
       'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
       'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
       'cash_entries', 'stocktakes', 'customer_directory',
-      'supplier_directory', 'debt_adjustments', 'app_settings'
+      'supplier_directory', 'debt_adjustments', 'product_categories',
+      'app_settings'
     ];
     final data = <String, Object?>{
       'app': 'MinhCanhMobileV3',
-      'backup_version': 4,
+      'backup_version': 5,
       'created_at': DateTime.now().toIso8601String(),
     };
     for (final table in tables) {
@@ -1398,13 +1534,14 @@ class StoreDb {
       'warranty_claims', 'stocktakes', 'cash_entries', 'debt_adjustments', 'repairs',
       'inventory_movements', 'sale_items', 'sales', 'purchase_items',
       'serial_units', 'purchases', 'products', 'customer_directory',
-      'supplier_directory', 'app_settings'
+      'supplier_directory', 'product_categories', 'app_settings'
     ];
     const insertOrder = [
       'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
       'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
       'cash_entries', 'stocktakes', 'customer_directory',
-      'supplier_directory', 'debt_adjustments', 'app_settings'
+      'supplier_directory', 'debt_adjustments', 'product_categories',
+      'app_settings'
     ];
     final db = await database;
     await db.execute('PRAGMA foreign_keys = OFF');
@@ -1424,6 +1561,7 @@ class StoreDb {
           }
         }
         await _backfillDirectories(txn);
+        await _createV6Tables(txn);
       });
     } finally {
       await db.execute('PRAGMA foreign_keys = ON');
@@ -1662,8 +1800,8 @@ class SaleLineDraft {
 
   final Map<String, Object?> product;
   int quantity;
-  final int unitPrice;
-  final int discountPerItem;
+  int unitPrice;
+  int discountPerItem;
   final int? serialId;
   final String imei;
   final String color;
@@ -1966,8 +2104,31 @@ class ProductsPage extends StatefulWidget {
 }
 
 class _ProductsPageState extends State<ProductsPage> {
+  final searchController = TextEditingController();
   String search = '';
+  String selectedCategory = '';
+  List<String> categories = [];
   bool showInactive = false;
+
+  @override
+  void initState() {
+    super.initState();
+    loadCategories();
+  }
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> loadCategories() async {
+    final rows = await StoreDb.instance.productCategories();
+    if (mounted) {
+      setState(() =>
+          categories = rows.map((row) => '${row['name']}').toList());
+    }
+  }
 
   @override
   Widget build(BuildContext context) => Column(children: [
@@ -1979,11 +2140,37 @@ class _ProductsPageState extends State<ProductsPage> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: TextField(
-            decoration: const InputDecoration(
-              prefixIcon: Icon(Icons.search),
-              hintText: 'Tên, mã hàng hoặc IMEI',
+            controller: searchController,
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.search),
+              hintText: 'Tên, mã hàng, mã vạch hoặc IMEI',
+              suffixIcon: IconButton(
+                tooltip: 'Quét bằng camera',
+                onPressed: scanProduct,
+                icon: const Icon(Icons.qr_code_scanner),
+              ),
             ),
-            onChanged: (v) => setState(() => search = v.toLowerCase()),
+            onChanged: (v) =>
+                setState(() => search = v.trim().toLowerCase()),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: DropdownButtonFormField<String>(
+            initialValue: selectedCategory,
+            decoration: const InputDecoration(
+              labelText: 'Lọc theo phân loại',
+              prefixIcon: Icon(Icons.category_outlined),
+            ),
+            items: [
+              const DropdownMenuItem(
+                  value: '', child: Text('Tất cả phân loại')),
+              ...categories.map((value) =>
+                  DropdownMenuItem(value: value, child: Text(value))),
+            ],
+            onChanged: (value) =>
+                setState(() => selectedCategory = value ?? ''),
           ),
         ),
         const SizedBox(height: 10),
@@ -2021,10 +2208,13 @@ class _ProductsPageState extends State<ProductsPage> {
               final inactive = p['active'] != 1;
               final matchesStatus = showInactive == inactive;
               final matchesSearch =
-                  '${p['name']} ${p['code']} ${p['imeis'] ?? ''}'
+                  '${p['name']} ${p['code']} ${p['category']} ${p['imeis'] ?? ''}'
                       .toLowerCase()
                       .contains(search);
-              return matchesStatus && matchesSearch;
+              final matchesCategory = selectedCategory.isEmpty ||
+                  '${p['category']}'.toLowerCase() ==
+                      selectedCategory.toLowerCase();
+              return matchesStatus && matchesSearch && matchesCategory;
             }).toList();
             if (rows.isEmpty) {
               return Center(child: Text(
@@ -2061,7 +2251,7 @@ class _ProductsPageState extends State<ProductsPage> {
                     ),
                   ),
                   subtitle: Text(
-                    '${p['code']} • Tồn: ${p['stock']}\n'
+                    '${p['code']} • ${p['category']} • Tồn: ${p['stock']}\n'
                     '${active ? 'Đang kinh doanh' : 'Ngừng kinh doanh'}',
                   ),
                   isThreeLine: true,
@@ -2086,6 +2276,7 @@ class _ProductsPageState extends State<ProductsPage> {
       MaterialPageRoute(builder: (_) => const ProductForm()),
     );
     if (changed == true) {
+      await loadCategories();
       setState(() {});
       widget.onChanged();
     }
@@ -2106,6 +2297,28 @@ class _ProductsPageState extends State<ProductsPage> {
     );
     setState(() {});
   }
+
+  Future<void> scanProduct() async {
+    final scanned = await Navigator.push<String>(context,
+        MaterialPageRoute(builder: (_) => const ScanCodePage(
+          title: 'Quét hàng hóa / IMEI',
+        )));
+    if (scanned == null || !mounted) return;
+    final value = extractImei(scanned) ?? scanned.trim();
+    final rows = await StoreDb.instance.products(includeInactive: true);
+    final matches = rows.where((row) {
+      final code = '${row['code']}'.trim().toLowerCase();
+      final imeis = '${row['imeis'] ?? ''}'.split(' ');
+      return code == value.toLowerCase() || imeis.contains(value);
+    }).toList();
+    if (!mounted) return;
+    if (matches.length == 1) {
+      await _detail(matches.single);
+      return;
+    }
+    searchController.text = value;
+    setState(() => search = value.toLowerCase());
+  }
 }
 
 class ProductForm extends StatefulWidget {
@@ -2121,16 +2334,77 @@ class _ProductFormState extends State<ProductForm> {
   final brand = TextEditingController();
   final capacity = TextEditingController();
   final price = TextEditingController();
+  List<String> categories = [];
+  String category = 'Điện thoại';
   bool imei = true;
   bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    loadInitial();
+  }
+
+  @override
+  void dispose() {
+    code.dispose();
+    name.dispose();
+    brand.dispose();
+    capacity.dispose();
+    price.dispose();
+    super.dispose();
+  }
+
+  Future<void> loadInitial() async {
+    final values = await Future.wait([
+      StoreDb.instance.nextProductCode(),
+      StoreDb.instance.productCategories(),
+    ]);
+    if (!mounted) return;
+    final rows = values[1] as List<Map<String, Object?>>;
+    setState(() {
+      if (code.text.trim().isEmpty) code.text = values[0] as String;
+      categories = rows.map((row) => '${row['name']}').toList();
+      if (!categories.contains(category) && categories.isNotEmpty) {
+        category = categories.first;
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: const Text('Hàng hóa mới')),
         body: Form(key: form, child: ListView(padding: const EdgeInsets.all(16), children: [
-          TextFormField(controller: code, decoration: const InputDecoration(labelText: 'Mã hàng *'), validator: requiredText),
+          TextFormField(controller: code,
+              decoration: InputDecoration(
+                labelText: 'Mã hàng / mã vạch *',
+                suffixIcon: IconButton(
+                  tooltip: 'Quét mã hàng',
+                  onPressed: scanProductCode,
+                  icon: const Icon(Icons.qr_code_scanner),
+                ),
+              ),
+              validator: requiredText),
           const SizedBox(height: 12),
           TextFormField(controller: name, decoration: const InputDecoration(labelText: 'Tên hàng *'), validator: requiredText),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            key: ValueKey('category-$category-${categories.length}'),
+            initialValue: categories.contains(category) ? category : null,
+            decoration: const InputDecoration(
+              labelText: 'Phân loại hàng hóa *',
+              prefixIcon: Icon(Icons.category_outlined),
+            ),
+            items: [
+              ...categories.map((value) =>
+                  DropdownMenuItem(value: value, child: Text(value))),
+              const DropdownMenuItem(
+                value: '__new__',
+                child: Text('+ Tạo phân loại mới'),
+              ),
+            ],
+            onChanged: pickCategory,
+          ),
           const SizedBox(height: 12),
           TextFormField(controller: brand, decoration: const InputDecoration(labelText: 'Thương hiệu')),
           const SizedBox(height: 12),
@@ -2138,19 +2412,57 @@ class _ProductFormState extends State<ProductForm> {
           const SizedBox(height: 12),
           TextFormField(controller: price, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Giá bán')),
           const SizedBox(height: 12),
-          Card(child: SwitchListTile(title: const Text('Quản lý theo Serial/IMEI'), subtitle: Text(imei ? 'Điện thoại: mỗi máy một IMEI' : 'Phụ kiện: quản lý theo số lượng'), value: imei, onChanged: (v) => setState(() => imei = v))),
+          Card(child: SwitchListTile(title: const Text('Quản lý theo Serial/IMEI'), subtitle: Text(imei ? 'Điện thoại: mỗi máy một IMEI' : 'Phụ kiện: quản lý theo số lượng'), value: imei, onChanged: (value) => setState(() {
+            final oldDefault = imei ? 'Điện thoại' : 'Phụ kiện';
+            imei = value;
+            if (category == oldDefault) {
+              final nextDefault = imei ? 'Điện thoại' : 'Phụ kiện';
+              if (categories.contains(nextDefault)) category = nextDefault;
+            }
+          }))),
           const SizedBox(height: 20),
           FilledButton.icon(onPressed: saving ? null : save, icon: const Icon(Icons.save), label: const Text('Lưu mẫu hàng')),
         ])),
       );
 
   String? requiredText(String? v) => v == null || v.trim().isEmpty ? 'Không được để trống' : null;
+
+  Future<void> scanProductCode() async {
+    final result = await Navigator.push<String>(context,
+        MaterialPageRoute(builder: (_) => const ScanCodePage(
+          title: 'Quét mã hàng',
+          hint: 'Đưa mã vạch có sẵn của sản phẩm vào khung',
+        )));
+    if (result != null && mounted) code.text = result.trim();
+  }
+
+  Future<void> pickCategory(String? value) async {
+    if (value == null) return;
+    if (value != '__new__') {
+      setState(() => category = value);
+      return;
+    }
+    final created = await promptNewCategory(context);
+    if (created == null || !mounted) return;
+    final saved = await StoreDb.instance.addProductCategory(created);
+    final rows = await StoreDb.instance.productCategories();
+    if (!mounted) return;
+    setState(() {
+      categories = rows.map((row) => '${row['name']}').toList();
+      category = saved;
+    });
+  }
+
   Future<void> save() async {
     if (!form.currentState!.validate()) return;
+    if (category.trim().isEmpty) {
+      showError(context, 'Hãy chọn phân loại hàng hóa');
+      return;
+    }
     setState(() => saving = true);
     try {
       await StoreDb.instance.addProduct({
-        'code': code.text.trim(), 'name': name.text.trim(), 'category': imei ? 'Điện thoại' : 'Phụ kiện',
+        'code': code.text.trim(), 'name': name.text.trim(), 'category': category,
         'brand': brand.text.trim(), 'capacity': capacity.text.trim(), 'sale_price': int.tryParse(price.text) ?? 0,
         'track_imei': imei ? 1 : 0, 'created_at': DateTime.now().toIso8601String(),
       });
@@ -2224,6 +2536,7 @@ class _ProductDetailState extends State<ProductDetail> {
                   ),
                 ]),
                 Text('Mã: ${p['code']}'),
+                Text('Phân loại: ${p['category']}'),
                 Text('Giá bán: ${vnd(p['sale_price'] as int)}'),
                 if (!tracks)
                   Text('Giá nhập bình quân: ${vnd(p['avg_cost'] as int)}'),
@@ -2250,6 +2563,14 @@ class _ProductDetailState extends State<ProductDetail> {
               ),
             ),
           ],
+          const SizedBox(height: 12),
+          FilledButton.tonalIcon(
+            onPressed: tracks ? printAllImeiLabels : printProductLabel,
+            icon: const Icon(Icons.label_outline),
+            label: Text(tracks
+                ? 'In tem 40×30 cho IMEI còn hàng'
+                : 'In tem mã hàng 40×30'),
+          ),
           const SizedBox(height: 14),
           Text(
             tracks ? 'Danh sách IMEI' : 'Tồn kho',
@@ -2278,7 +2599,14 @@ class _ProductDetailState extends State<ProductDetail> {
                     '${statusName('${s['status']}')}',
                   ),
                   isThreeLine: true,
-                  trailing: const Icon(Icons.edit_outlined),
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    IconButton(
+                      tooltip: 'In tem IMEI',
+                      onPressed: () => printSerialLabel(s),
+                      icon: const Icon(Icons.label_outline),
+                    ),
+                    const Icon(Icons.edit_outlined),
+                  ]),
                   onTap: () => editSerial(s),
                 ))).toList());
               },
@@ -2362,6 +2690,48 @@ class _ProductDetailState extends State<ProductDetail> {
     }
   }
 
+  Future<void> printProductLabel() async {
+    await Navigator.push(context, MaterialPageRoute(
+      builder: (_) => LabelPreviewPage(labels: [
+        ProductLabelData(
+          productName: '${product['name']}',
+          detail: [product['brand'], product['capacity']]
+              .map((value) => '${value ?? ''}'.trim())
+              .where((value) => value.isNotEmpty)
+              .join(' • '),
+          code: '${product['code']}',
+          price: (product['sale_price'] as num).toInt(),
+          isImei: false,
+        ),
+      ]),
+    ));
+  }
+
+  Future<void> printSerialLabel(Map<String, Object?> serial) async {
+    await Navigator.push(context, MaterialPageRoute(
+      builder: (_) => LabelPreviewPage(labels: [
+        labelForSerial(product, serial),
+      ]),
+    ));
+  }
+
+  Future<void> printAllImeiLabels() async {
+    final rows = await StoreDb.instance.serials(
+      product['id'] as int,
+      status: 'in_stock',
+    );
+    if (!mounted) return;
+    if (rows.isEmpty) {
+      showError(context, 'Sản phẩm không có IMEI còn trong kho để in tem');
+      return;
+    }
+    await Navigator.push(context, MaterialPageRoute(
+      builder: (_) => LabelPreviewPage(
+        labels: rows.map((serial) => labelForSerial(product, serial)).toList(),
+      ),
+    ));
+  }
+
   Future<void> toggleActive() async {
     final active = product['active'] == 1;
     final accepted = await confirm(
@@ -2423,6 +2793,8 @@ class _ProductEditFormState extends State<ProductEditForm> {
   final form = GlobalKey<FormState>();
   late final TextEditingController code;
   late final TextEditingController name;
+  late String category;
+  List<String> categories = [];
   late final TextEditingController brand;
   late final TextEditingController capacity;
   late final TextEditingController salePrice;
@@ -2436,10 +2808,12 @@ class _ProductEditFormState extends State<ProductEditForm> {
     super.initState();
     code = TextEditingController(text: '${widget.product['code']}');
     name = TextEditingController(text: '${widget.product['name']}');
+    category = '${widget.product['category']}';
     brand = TextEditingController(text: '${widget.product['brand']}');
     capacity = TextEditingController(text: '${widget.product['capacity']}');
     salePrice = TextEditingController(text: '${widget.product['sale_price']}');
     averageCost = TextEditingController(text: '${widget.product['avg_cost']}');
+    loadCategories();
   }
 
   @override
@@ -2456,6 +2830,29 @@ class _ProductEditFormState extends State<ProductEditForm> {
   String? requiredText(String? value) =>
       value == null || value.trim().isEmpty ? 'Không được để trống' : null;
 
+  Future<void> loadCategories() async {
+    final rows = await StoreDb.instance.productCategories();
+    if (!mounted) return;
+    setState(() {
+      categories = rows.map((row) => '${row['name']}').toList();
+      if (!categories.contains(category)) categories.add(category);
+      categories.sort();
+    });
+  }
+
+  Future<void> pickCategory(String? value) async {
+    if (value == null) return;
+    if (value != '__new__') {
+      setState(() => category = value);
+      return;
+    }
+    final created = await promptNewCategory(context);
+    if (created == null || !mounted) return;
+    final saved = await StoreDb.instance.addProductCategory(created);
+    await loadCategories();
+    if (mounted) setState(() => category = saved);
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Sửa thông tin hàng hóa')),
@@ -2469,6 +2866,19 @@ class _ProductEditFormState extends State<ProductEditForm> {
         TextFormField(controller: name,
             decoration: const InputDecoration(labelText: 'Tên hàng *'),
             validator: requiredText),
+        const SizedBox(height: 12),
+        DropdownButtonFormField<String>(
+          key: ValueKey('edit-category-$category-${categories.length}'),
+          initialValue: categories.contains(category) ? category : null,
+          decoration: const InputDecoration(labelText: 'Phân loại hàng hóa *'),
+          items: [
+            ...categories.map((value) =>
+                DropdownMenuItem(value: value, child: Text(value))),
+            const DropdownMenuItem(
+                value: '__new__', child: Text('+ Tạo phân loại mới')),
+          ],
+          onChanged: pickCategory,
+        ),
         const SizedBox(height: 12),
         TextFormField(controller: brand,
             decoration: const InputDecoration(labelText: 'Thương hiệu')),
@@ -2511,6 +2921,7 @@ class _ProductEditFormState extends State<ProductEditForm> {
         id: widget.product['id'] as int,
         code: code.text,
         name: name.text,
+        category: category,
         brand: brand.text,
         capacity: capacity.text,
         salePrice: int.tryParse(salePrice.text) ?? 0,
@@ -2732,6 +3143,47 @@ class _PurchaseFormState extends State<PurchaseForm> {
     quantity = serials.length;
   });
 
+  Future<void> scanManyImeis() async {
+    final scanned = await Navigator.push<List<String>>(context,
+        MaterialPageRoute(builder: (_) => const ImeiBatchScannerPage()));
+    if (scanned == null || scanned.isEmpty || !mounted) return;
+    final existingInDraft = serials
+        .map((draft) => draft.imei.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet();
+    for (final imei in scanned) {
+      if (existingInDraft.contains(imei)) continue;
+      if (await StoreDb.instance.serialExists(imei)) {
+        if (mounted) showError(context, 'IMEI $imei đã có trong kho/lịch sử');
+        continue;
+      }
+      existingInDraft.add(imei);
+      final blank = serials.where((draft) => draft.imei.trim().isEmpty);
+      if (blank.isNotEmpty) {
+        blank.first.imei = imei;
+      } else {
+        serials.add(SerialDraft(imei: imei));
+      }
+    }
+    if (mounted) {
+      setState(() => quantity = serials.length);
+    }
+  }
+
+  Future<void> createProduct() async {
+    final created = await Navigator.push<bool>(context,
+        MaterialPageRoute(builder: (_) => const ProductForm()));
+    if (created != true || !mounted) return;
+    final rows = await StoreDb.instance.products();
+    if (!mounted || rows.isEmpty) return;
+    setState(() {
+      product = rows.first;
+      quantity = 1;
+      serials.clear();
+      _syncSerials();
+    });
+  }
+
   Future<void> _pickProduct(
       List<Map<String, Object?>> products) async {
     if (products.isEmpty) {
@@ -2784,6 +3236,12 @@ class _PurchaseFormState extends State<PurchaseForm> {
           trailing: const Icon(Icons.chevron_right),
           onTap: () => _pickProduct(products),
         )),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: createProduct,
+          icon: const Icon(Icons.add_box_outlined),
+          label: const Text('Tạo hàng hóa hoặc phân loại mới'),
+        ),
         const SizedBox(height: 12),
         if (product?['track_imei'] == 1)
           Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -2791,7 +3249,14 @@ class _PurchaseFormState extends State<PurchaseForm> {
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const Text('Mỗi IMEI tương ứng với một máy nhập.'),
             const SizedBox(height: 8),
+            FilledButton.tonalIcon(
+              onPressed: scanManyImeis,
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Quét liên tục nhiều IMEI bằng camera'),
+            ),
+            const SizedBox(height: 8),
             ...List.generate(serials.length, (i) => SerialEditor(
+                key: ObjectKey(serials[i]),
                 index: i, draft: serials[i], onRemove: () => _removeSerial(i),
                 canRemove: serials.length > 1)),
             OutlinedButton.icon(
@@ -2871,6 +3336,14 @@ class _PurchaseFormState extends State<PurchaseForm> {
         serials.any((s) => s.imei.trim().isEmpty)) {
       return showError(context, 'Hãy nhập đủ IMEI');
     }
+    if (product!['track_imei'] == 1 &&
+        serials.any((s) => !isValidImei(s.imei.trim()))) {
+      return showError(context, 'IMEI phải đủ 15 số và đúng mã kiểm tra');
+    }
+    if (product!['track_imei'] == 1 &&
+        serials.map((s) => s.imei.trim()).toSet().length != serials.length) {
+      return showError(context, 'Danh sách đang có IMEI trùng nhau');
+    }
     setState(() => saving = true);
     try {
       for (final s in serials) { s.cost = netUnitCost; }
@@ -2900,6 +3373,7 @@ class ProductSearchSheet extends StatefulWidget {
 class _ProductSearchSheetState extends State<ProductSearchSheet> {
   final search = TextEditingController();
   String query = '';
+  String category = '';
 
   @override
   void dispose() {
@@ -2910,6 +3384,12 @@ class _ProductSearchSheetState extends State<ProductSearchSheet> {
   @override
   Widget build(BuildContext context) {
     final normalized = query.trim().toLowerCase();
+    final categories = widget.products
+        .map((product) => '${product['category']}')
+        .where((value) => value.trim().isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
     final rows = widget.products.where((product) {
       final text = [
         product['name'],
@@ -2917,8 +3397,12 @@ class _ProductSearchSheetState extends State<ProductSearchSheet> {
         product['brand'],
         product['capacity'],
         product['category'],
+        product['imeis'],
       ].map((value) => '${value ?? ''}').join(' ').toLowerCase();
-      return normalized.isEmpty || text.contains(normalized);
+      final matchesQuery = normalized.isEmpty || text.contains(normalized);
+      final matchesCategory = category.isEmpty ||
+          '${product['category']}'.toLowerCase() == category.toLowerCase();
+      return matchesQuery && matchesCategory;
     }).toList();
 
     return FractionallySizedBox(
@@ -2946,19 +3430,31 @@ class _ProductSearchSheetState extends State<ProductSearchSheet> {
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
               prefixIcon: const Icon(Icons.search),
-              hintText: 'Nhập tên, mã hàng, hãng hoặc dung lượng',
-              suffixIcon: query.isEmpty
-                  ? null
-                  : IconButton(
-                      tooltip: 'Xóa từ khóa',
-                      onPressed: () {
-                        search.clear();
-                        setState(() => query = '');
-                      },
-                      icon: const Icon(Icons.clear),
-                    ),
+              hintText: 'Tên, mã hàng, mã vạch, IMEI…',
+              suffixIcon: IconButton(
+                tooltip: 'Quét bằng camera',
+                onPressed: scan,
+                icon: const Icon(Icons.qr_code_scanner),
+              ),
             ),
             onChanged: (value) => setState(() => query = value),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          child: DropdownButtonFormField<String>(
+            initialValue: category,
+            decoration: const InputDecoration(
+              labelText: 'Phân loại',
+              prefixIcon: Icon(Icons.category_outlined),
+            ),
+            items: [
+              const DropdownMenuItem(
+                  value: '', child: Text('Tất cả phân loại')),
+              ...categories.map((value) =>
+                  DropdownMenuItem(value: value, child: Text(value))),
+            ],
+            onChanged: (value) => setState(() => category = value ?? ''),
           ),
         ),
         Expanded(
@@ -3006,31 +3502,118 @@ class _ProductSearchSheetState extends State<ProductSearchSheet> {
       ]),
     );
   }
+
+  Future<void> scan() async {
+    final scanned = await Navigator.push<String>(context,
+        MaterialPageRoute(builder: (_) => const ScanCodePage(
+          title: 'Quét mã hàng / IMEI',
+        )));
+    if (scanned == null || !mounted) return;
+    final normalized = extractImei(scanned) ?? scanned.trim();
+    final matches = widget.products.where((product) {
+      final productCode = '${product['code']}'.trim().toLowerCase();
+      final imeis = '${product['imeis'] ?? ''}'.split(' ');
+      return productCode == normalized.toLowerCase() ||
+          imeis.contains(normalized);
+    }).toList();
+    if (matches.length == 1) {
+      Navigator.pop(context, {
+        ...matches.single,
+        '_scan_code': normalized,
+      });
+      return;
+    }
+    search.text = normalized;
+    setState(() => query = normalized);
+  }
 }
 
-class SerialEditor extends StatelessWidget {
+class SerialEditor extends StatefulWidget {
   const SerialEditor({super.key, required this.index, required this.draft,
       required this.onRemove, required this.canRemove});
   final int index;
   final SerialDraft draft;
   final VoidCallback onRemove;
   final bool canRemove;
+
+  @override
+  State<SerialEditor> createState() => _SerialEditorState();
+}
+
+class _SerialEditorState extends State<SerialEditor> {
+  late final TextEditingController imei;
+  late final TextEditingController color;
+
+  @override
+  void initState() {
+    super.initState();
+    imei = TextEditingController(text: widget.draft.imei);
+    color = TextEditingController(text: widget.draft.color);
+  }
+
+  @override
+  void didUpdateWidget(covariant SerialEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (imei.text != widget.draft.imei) imei.text = widget.draft.imei;
+    if (color.text != widget.draft.color) color.text = widget.draft.color;
+  }
+
+  @override
+  void dispose() {
+    imei.dispose();
+    color.dispose();
+    super.dispose();
+  }
+
+  Future<void> scanImei() async {
+    final raw = await Navigator.push<String>(context,
+        MaterialPageRoute(builder: (_) => const ScanCodePage(
+          title: 'Quét IMEI',
+          hint: 'Đưa mã vạch IMEI 15 số vào giữa khung hình',
+        )));
+    if (raw == null || !mounted) return;
+    final value = extractImei(raw);
+    if (value == null || !isValidImei(value)) {
+      showError(context, 'Mã quét không phải IMEI hợp lệ');
+      return;
+    }
+    imei.text = value;
+    widget.draft.imei = value;
+  }
+
   @override
   Widget build(BuildContext context) => Card(
     margin: const EdgeInsets.only(bottom: 10),
     child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
-        Expanded(child: Text('Máy ${index + 1}', style: const TextStyle(fontWeight: FontWeight.bold))),
-        if (canRemove) IconButton(
+        Expanded(child: Text('Máy ${widget.index + 1}', style: const TextStyle(fontWeight: FontWeight.bold))),
+        if (widget.canRemove) IconButton(
           tooltip: 'Bỏ máy này',
-          onPressed: onRemove,
+          onPressed: widget.onRemove,
           icon: const Icon(Icons.remove_circle_outline, color: Colors.red),
         ),
       ]),
       const SizedBox(height: 8),
-      TextFormField(initialValue: draft.imei, decoration: const InputDecoration(labelText: 'IMEI *'), onChanged: (v) => draft.imei = v),
+      TextFormField(
+        controller: imei,
+        keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        maxLength: 15,
+        decoration: InputDecoration(
+          labelText: 'IMEI *',
+          counterText: '',
+          suffixIcon: IconButton(
+            tooltip: 'Quét IMEI',
+            onPressed: scanImei,
+            icon: const Icon(Icons.qr_code_scanner),
+          ),
+        ),
+        onChanged: (value) => widget.draft.imei = value,
+      ),
       const SizedBox(height: 8),
-      TextFormField(initialValue: draft.color, decoration: const InputDecoration(labelText: 'Màu sắc'), onChanged: (v) => draft.color = v),
+      TextFormField(controller: color,
+          decoration: const InputDecoration(labelText: 'Màu sắc'),
+          onChanged: (value) => widget.draft.color = value),
     ])),
   );
 }
@@ -3056,6 +3639,8 @@ class _SalePageState extends State<SalePage> {
   final customWarranty = TextEditingController();
   final cart = <SaleLineDraft>[];
   List<Map<String, Object?>> customers = [];
+  VietQrAccount? paymentAccount;
+  late String invoiceCode;
   int selectedCustomerId = 0;
   int warranty = 0;
   bool saving = false;
@@ -3063,7 +3648,9 @@ class _SalePageState extends State<SalePage> {
   @override
   void initState() {
     super.initState();
+    invoiceCode = newInvoiceCode();
     _loadCustomers();
+    loadPaymentAccount();
   }
 
   @override
@@ -3094,6 +3681,25 @@ class _SalePageState extends State<SalePage> {
     final value = cartTotal - (int.tryParse(cash.text) ?? 0) -
         (int.tryParse(transfer.text) ?? 0);
     return value < 0 ? 0 : value;
+  }
+
+  int get transferAmount => int.tryParse(transfer.text) ?? 0;
+
+  Future<void> loadPaymentAccount() async {
+    final bin = await StoreDb.instance.getSetting('payment_bank_bin') ?? '';
+    final bank = await StoreDb.instance.getSetting('payment_bank_name') ?? '';
+    final number =
+        await StoreDb.instance.getSetting('payment_account_number') ?? '';
+    final name =
+        await StoreDb.instance.getSetting('payment_account_name') ?? '';
+    if (!mounted) return;
+    final account = VietQrAccount(
+      bankBin: bin,
+      bankName: bank,
+      accountNumber: number,
+      accountName: name,
+    );
+    setState(() => paymentAccount = account.isValid ? account : null);
   }
 
   Widget _saleSummaryRow(String label, String value,
@@ -3170,13 +3776,33 @@ class _SalePageState extends State<SalePage> {
       ),
     );
     if (selected == null || !mounted) return;
+    final scannedCode = '${selected['_scan_code'] ?? ''}'.trim();
+    final cleanProduct = Map<String, Object?>.from(selected)
+      ..remove('_scan_code');
     setState(() {
-      product = selected;
+      product = cleanProduct;
       serialId = null;
       quantity = 1;
-      price.text = '${selected['sale_price']}';
+      price.text = '${cleanProduct['sale_price']}';
       saleDiscount.text = '0';
     });
+    if (scannedCode.isEmpty) return;
+    if (cleanProduct['track_imei'] == 1) {
+      final rows = await StoreDb.instance.serials(
+        cleanProduct['id'] as int,
+        status: 'in_stock',
+      );
+      final match = rows.where((row) => '${row['imei']}' == scannedCode);
+      if (match.isEmpty) {
+        if (mounted) {
+          showError(context,
+              'Hãy quét đúng IMEI của máy còn trong kho hoặc chọn IMEI');
+        }
+        return;
+      }
+      if (mounted) setState(() => serialId = match.first['id'] as int);
+    }
+    await addItem();
   }
 
   Future<void> addItem() async {
@@ -3271,6 +3897,104 @@ class _SalePageState extends State<SalePage> {
       quantity = 1;
       price.clear();
       saleDiscount.text = '0';
+    });
+  }
+
+  Future<void> editCartItem(int index) async {
+    final item = cart[index];
+    final priceController = TextEditingController(text: '${item.unitPrice}');
+    final discountController =
+        TextEditingController(text: '${item.discountPerItem}');
+    final quantityController = TextEditingController(text: '${item.quantity}');
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Sửa ${item.product['name']}'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: priceController,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(labelText: 'Giá bán'),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: discountController,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration:
+                  const InputDecoration(labelText: 'Giảm giá mỗi sản phẩm'),
+            ),
+            if (!item.tracksImei) ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: quantityController,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(labelText: 'Số lượng'),
+              ),
+            ],
+          ]),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Bỏ qua')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Lưu')),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    final newPrice = int.tryParse(priceController.text) ?? 0;
+    final newDiscount = int.tryParse(discountController.text) ?? 0;
+    final newQuantity = item.tracksImei
+        ? 1
+        : (int.tryParse(quantityController.text) ?? 0);
+    if (newPrice <= 0 || newDiscount < 0 || newDiscount > newPrice) {
+      showError(context, 'Giá bán hoặc giảm giá không hợp lệ');
+      return;
+    }
+    if (newQuantity <= 0) {
+      showError(context, 'Số lượng phải lớn hơn 0');
+      return;
+    }
+    if (!item.tracksImei) {
+      final otherQuantity = cart
+          .asMap()
+          .entries
+          .where((entry) =>
+              entry.key != index &&
+              entry.value.serialId == null &&
+              entry.value.product['id'] == item.product['id'])
+          .fold<int>(0, (sum, entry) => sum + entry.value.quantity);
+      if (otherQuantity + newQuantity >
+          (item.product['stock'] as num).toInt()) {
+        showError(context, 'Tổng số lượng trong hóa đơn vượt tồn kho');
+        return;
+      }
+    }
+    setState(() {
+      item.unitPrice = newPrice;
+      item.discountPerItem = newDiscount;
+      item.quantity = newQuantity;
+    });
+  }
+
+  void usePayment(String kind) {
+    setState(() {
+      if (kind == 'cash') {
+        cash.text = '$cartTotal';
+        transfer.text = '0';
+      } else if (kind == 'transfer') {
+        cash.text = '0';
+        transfer.text = '$cartTotal';
+      } else if (kind == 'debt') {
+        cash.text = '0';
+        transfer.text = '0';
+      }
     });
   }
 
@@ -3438,6 +4162,7 @@ class _SalePageState extends State<SalePage> {
                       '${item.discountPerItem > 0 ? ' • Giảm: ${vnd(item.discountPerItem)}' : ''}',
                     ),
                     isThreeLine: true,
+                    onTap: () => editCartItem(index),
                     trailing: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.end,
@@ -3447,13 +4172,22 @@ class _SalePageState extends State<SalePage> {
                           style: const TextStyle(
                               fontWeight: FontWeight.bold),
                         ),
-                        InkWell(
-                          onTap: () => setState(() => cart.removeAt(index)),
-                          child: const Padding(
-                            padding: EdgeInsets.only(top: 5),
-                            child: Icon(Icons.delete_outline,
-                                color: Colors.red, size: 21),
-                          ),
+                        PopupMenuButton<String>(
+                          padding: EdgeInsets.zero,
+                          tooltip: 'Sửa hoặc xóa',
+                          onSelected: (action) {
+                            if (action == 'edit') {
+                              editCartItem(index);
+                            } else if (action == 'delete') {
+                              setState(() => cart.removeAt(index));
+                            }
+                          },
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(
+                                value: 'edit', child: Text('Sửa giá/giảm giá')),
+                            PopupMenuItem(
+                                value: 'delete', child: Text('Xóa khỏi hóa đơn')),
+                          ],
                         ),
                       ],
                     ),
@@ -3511,6 +4245,29 @@ class _SalePageState extends State<SalePage> {
               ),
             ],
             const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ActionChip(
+                  avatar: const Icon(Icons.payments_outlined, size: 18),
+                  label: const Text('Tiền mặt đủ'),
+                  onPressed: () => usePayment('cash'),
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.qr_code, size: 18),
+                  label: const Text('Chuyển khoản đủ'),
+                  onPressed: () => usePayment('transfer'),
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.account_balance_wallet_outlined,
+                      size: 18),
+                  label: const Text('Khách nợ'),
+                  onPressed: () => usePayment('debt'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
             TextField(
               controller: cash,
               keyboardType: TextInputType.number,
@@ -3521,6 +4278,15 @@ class _SalePageState extends State<SalePage> {
                   const InputDecoration(labelText: 'Tiền mặt'),
               onChanged: (_) => setState(() {}),
             ),
+            if (transferAmount > 0) ...[
+              const SizedBox(height: 12),
+              PaymentQrCard(
+                account: paymentAccount,
+                amount: transferAmount,
+                invoiceCode: invoiceCode,
+                onSettingsChanged: loadPaymentAccount,
+              ),
+            ],
             const SizedBox(height: 12),
             TextField(
               controller: transfer,
@@ -3608,6 +4374,7 @@ class _SalePageState extends State<SalePage> {
     setState(() => saving = true);
     try {
       await StoreDb.instance.completeMultiSale(
+        invoiceCode: invoiceCode,
         items: List<SaleLineDraft>.from(cart),
         customer: customer.text,
         phone: phone.text,
@@ -3629,6 +4396,7 @@ class _SalePageState extends State<SalePage> {
         quantity = 1;
         warranty = 0;
         selectedCustomerId = 0;
+        invoiceCode = newInvoiceCode();
         saving = false;
       });
       widget.onChanged();
@@ -3654,7 +4422,14 @@ class InvoicesPage extends StatefulWidget {
 }
 
 class _InvoicesPageState extends State<InvoicesPage> {
+  final searchController = TextEditingController();
   String search = '';
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) => Column(children: [
@@ -3662,9 +4437,15 @@ class _InvoicesPageState extends State<InvoicesPage> {
     Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: TextField(
-        decoration: const InputDecoration(
-          prefixIcon: Icon(Icons.search),
+        controller: searchController,
+        decoration: InputDecoration(
+          prefixIcon: const Icon(Icons.search),
           hintText: 'Tìm tên khách, tên máy, mã hóa đơn hoặc IMEI',
+          suffixIcon: IconButton(
+            tooltip: 'Quét hóa đơn / IMEI',
+            onPressed: scanInvoice,
+            icon: const Icon(Icons.qr_code_scanner),
+          ),
         ),
         onChanged: (value) =>
             setState(() => search = value.trim().toLowerCase()),
@@ -3773,6 +4554,31 @@ class _InvoicesPageState extends State<InvoicesPage> {
     } catch (e) {
       if (mounted) showError(context, e);
     }
+  }
+
+  Future<void> scanInvoice() async {
+    final scanned = await Navigator.push<String>(context,
+        MaterialPageRoute(builder: (_) => const ScanCodePage(
+          title: 'Quét hóa đơn / IMEI',
+        )));
+    if (scanned == null || !mounted) return;
+    final value = extractImei(scanned) ?? scanned.trim();
+    final rows = await StoreDb.instance.sales();
+    final matches = rows.where((sale) {
+      final code = '${sale['code']}'.trim().toLowerCase();
+      final imeis = '${sale['imeis'] ?? ''}'.split(' ');
+      return code == value.toLowerCase() || imeis.contains(value);
+    }).toList();
+    if (!mounted) return;
+    if (matches.length == 1) {
+      await Navigator.push(context, MaterialPageRoute(
+          builder: (_) => InvoiceDetailPage(
+              saleId: matches.single['id'] as int)));
+      if (mounted) setState(() {});
+      return;
+    }
+    searchController.text = value;
+    setState(() => search = value.toLowerCase());
   }
 
   Future<void> delete(int id) async {
@@ -3979,6 +4785,9 @@ class MorePage extends StatelessWidget {
     const PageHeader('Nhiều hơn'),
     MenuGroup('Hàng hóa', [
       MenuAction(Icons.inventory_2, 'Hàng hóa', () => onSelectTab(1)),
+      MenuAction(Icons.category_outlined, 'Phân loại hàng hóa', () =>
+          Navigator.push(context, MaterialPageRoute(
+              builder: (_) => const CategoryManagerPage()))),
       MenuAction(Icons.download, 'Nhập hàng', () async { final ok = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => const PurchaseForm())); if (ok == true) onChanged(); }),
       MenuAction(Icons.fact_check, 'Kiểm kho', () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const StocktakePage())); onChanged(); }),
       MenuAction(Icons.assignment_return, 'Trả hàng nhập', () async { final ok = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => const InventoryActionPage(kind: 'supplier_return'))); if (ok == true) onChanged(); }),
@@ -4000,12 +4809,376 @@ class MorePage extends StatelessWidget {
     ]),
     const SizedBox(height: 12),
     MenuGroup('Dữ liệu', [
+      MenuAction(Icons.account_balance, 'Tài khoản nhận chuyển khoản', () =>
+          Navigator.push(context, MaterialPageRoute(
+              builder: (_) => const PaymentSettingsPage()))),
+      MenuAction(Icons.label_outline, 'Cài đặt máy in tem 40×30', () =>
+          Navigator.push(context, MaterialPageRoute(
+              builder: (_) => const LabelPrinterSettingsPage()))),
       MenuAction(Icons.print, 'Cài đặt máy in K80', () => Navigator.push(context,
           MaterialPageRoute(builder: (_) => const PrinterSettingsPage()))),
       MenuAction(Icons.backup, 'Sao lưu & khôi phục', () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BackupPage())); onChanged(); }),
       MenuAction(Icons.password, 'Đổi mã PIN', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ChangePinPage()))),
     ]),
   ]);
+}
+
+class CategoryManagerPage extends StatefulWidget {
+  const CategoryManagerPage({super.key});
+
+  @override
+  State<CategoryManagerPage> createState() => _CategoryManagerPageState();
+}
+
+class _CategoryManagerPageState extends State<CategoryManagerPage> {
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Phân loại hàng hóa')),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: add,
+          icon: const Icon(Icons.add),
+          label: const Text('Thêm phân loại'),
+        ),
+        body: FutureBuilder<List<Map<String, Object?>>>(
+          future: StoreDb.instance.productCategories(),
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final rows = snapshot.data!;
+            if (rows.isEmpty) {
+              return const EmptyState(Icons.category_outlined,
+                  'Chưa có phân loại', 'Bấm “Thêm phân loại” để bắt đầu.');
+            }
+            return ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
+              itemCount: rows.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final row = rows[index];
+                final count = (row['product_count'] as num? ?? 0).toInt();
+                return Card(child: ListTile(
+                  leading: const CircleAvatar(child: Icon(Icons.category)),
+                  title: Text('${row['name']}',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('$count hàng hóa'),
+                  trailing: PopupMenuButton<String>(
+                    onSelected: (action) {
+                      if (action == 'rename') rename(row);
+                      if (action == 'delete') remove(row);
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
+                      PopupMenuItem(value: 'delete', child: Text('Xóa')),
+                    ],
+                  ),
+                ));
+              },
+            );
+          },
+        ),
+      );
+
+  Future<void> add() async {
+    final value = await promptNewCategory(context);
+    if (value == null) return;
+    try {
+      await StoreDb.instance.addProductCategory(value);
+      if (mounted) setState(() {});
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+
+  Future<void> rename(Map<String, Object?> row) async {
+    final controller = TextEditingController(text: '${row['name']}');
+    final value = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Đổi tên phân loại'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Tên phân loại'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Bỏ qua')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, controller.text),
+              child: const Text('Lưu')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null) return;
+    try {
+      await StoreDb.instance.renameProductCategory(row['id'] as int, value);
+      if (mounted) setState(() {});
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+
+  Future<void> remove(Map<String, Object?> row) async {
+    final accepted = await confirm(context, 'Xóa phân loại',
+        'Xóa phân loại “${row['name']}”? Phân loại đang có hàng hóa sẽ không thể xóa.');
+    if (!accepted) return;
+    try {
+      await StoreDb.instance.deleteProductCategory(row['id'] as int);
+      if (mounted) setState(() {});
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+}
+
+class BankOption {
+  const BankOption(this.bin, this.name);
+  final String bin;
+  final String name;
+}
+
+const vietQrBanks = <BankOption>[
+  BankOption('970422', 'MB Bank'),
+  BankOption('970436', 'Vietcombank'),
+  BankOption('970415', 'VietinBank'),
+  BankOption('970418', 'BIDV'),
+  BankOption('970405', 'Agribank'),
+  BankOption('970407', 'Techcombank'),
+  BankOption('970432', 'VPBank'),
+  BankOption('970416', 'ACB'),
+  BankOption('970423', 'TPBank'),
+  BankOption('970403', 'Sacombank'),
+  BankOption('970441', 'VIB'),
+  BankOption('970426', 'MSB'),
+  BankOption('970437', 'HDBank'),
+  BankOption('970443', 'SHB'),
+  BankOption('970440', 'SeABank'),
+  BankOption('970448', 'OCB'),
+  BankOption('970431', 'Eximbank'),
+  BankOption('970449', 'LPBank'),
+  BankOption('970428', 'Nam A Bank'),
+  BankOption('970412', 'PVcomBank'),
+  BankOption('970433', 'VietBank'),
+  BankOption('970425', 'ABBank'),
+  BankOption('970419', 'NCB'),
+  BankOption('970452', 'KienlongBank'),
+];
+
+class PaymentSettingsPage extends StatefulWidget {
+  const PaymentSettingsPage({super.key});
+
+  @override
+  State<PaymentSettingsPage> createState() => _PaymentSettingsPageState();
+}
+
+class _PaymentSettingsPageState extends State<PaymentSettingsPage> {
+  final accountNumber = TextEditingController();
+  final accountName = TextEditingController();
+  String bankBin = vietQrBanks.first.bin;
+  bool loading = true;
+  bool saving = false;
+
+  BankOption get selectedBank =>
+      vietQrBanks.firstWhere((bank) => bank.bin == bankBin,
+          orElse: () => vietQrBanks.first);
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  @override
+  void dispose() {
+    accountNumber.dispose();
+    accountName.dispose();
+    super.dispose();
+  }
+
+  Future<void> load() async {
+    final savedBin =
+        await StoreDb.instance.getSetting('payment_bank_bin') ?? '';
+    accountNumber.text =
+        await StoreDb.instance.getSetting('payment_account_number') ?? '';
+    accountName.text =
+        await StoreDb.instance.getSetting('payment_account_name') ?? '';
+    if (!mounted) return;
+    setState(() {
+      if (vietQrBanks.any((bank) => bank.bin == savedBin)) bankBin = savedBin;
+      loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Tài khoản nhận chuyển khoản')),
+        body: loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView(padding: const EdgeInsets.all(16), children: [
+                const Card(child: Padding(
+                  padding: EdgeInsets.all(14),
+                  child: Text(
+                    'Chỉ lưu thông tin tài khoản nhận tiền trên điện thoại. '
+                    'Ứng dụng không yêu cầu mật khẩu hoặc mã OTP ngân hàng.',
+                  ),
+                )),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<String>(
+                  initialValue: bankBin,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Ngân hàng nhận tiền',
+                    prefixIcon: Icon(Icons.account_balance),
+                  ),
+                  items: vietQrBanks.map((bank) => DropdownMenuItem(
+                    value: bank.bin,
+                    child: Text('${bank.name} • ${bank.bin}'),
+                  )).toList(),
+                  onChanged: (value) =>
+                      setState(() => bankBin = value ?? bankBin),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: accountNumber,
+                  textCapitalization: TextCapitalization.characters,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+                    LengthLimitingTextInputFormatter(19),
+                  ],
+                  decoration: const InputDecoration(
+                    labelText: 'Số tài khoản nhận tiền *',
+                    prefixIcon: Icon(Icons.numbers),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: accountName,
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: const InputDecoration(
+                    labelText: 'Tên chủ tài khoản',
+                    prefixIcon: Icon(Icons.person_outline),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                FilledButton.icon(
+                  onPressed: saving ? null : save,
+                  icon: const Icon(Icons.save),
+                  label: Text(saving ? 'Đang lưu' : 'Lưu tài khoản mặc định'),
+                ),
+              ]),
+      );
+
+  Future<void> save() async {
+    final number = accountNumber.text.trim();
+    if (!RegExp(r'^[A-Za-z0-9]{6,19}$').hasMatch(number)) {
+      showError(context, 'Số tài khoản phải có từ 6 đến 19 ký tự');
+      return;
+    }
+    setState(() => saving = true);
+    await StoreDb.instance.setSetting('payment_bank_bin', bankBin);
+    await StoreDb.instance
+        .setSetting('payment_bank_name', selectedBank.name);
+    await StoreDb.instance.setSetting('payment_account_number', number);
+    await StoreDb.instance
+        .setSetting('payment_account_name', accountName.text.trim());
+    if (mounted) {
+      setState(() => saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đã lưu tài khoản nhận tiền')));
+    }
+  }
+}
+
+class PaymentQrCard extends StatelessWidget {
+  const PaymentQrCard({
+    super.key,
+    required this.account,
+    required this.amount,
+    required this.invoiceCode,
+    required this.onSettingsChanged,
+  });
+
+  final VietQrAccount? account;
+  final int amount;
+  final String invoiceCode;
+  final Future<void> Function() onSettingsChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final receiver = account;
+    if (receiver == null) {
+      return Card(
+        color: Colors.orange.shade50,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+            const Text('Chưa cài tài khoản nhận chuyển khoản',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            FilledButton.tonalIcon(
+              onPressed: () async {
+                await Navigator.push(context, MaterialPageRoute(
+                    builder: (_) => const PaymentSettingsPage()));
+                await onSettingsChanged();
+              },
+              icon: const Icon(Icons.settings),
+              label: const Text('Cài tài khoản nhận tiền'),
+            ),
+          ]),
+        ),
+      );
+    }
+    final payload = buildVietQrPayload(
+      bankBin: receiver.bankBin,
+      accountNumber: receiver.accountNumber,
+      amount: amount,
+      description: 'MCM $invoiceCode',
+    );
+    return Card(
+      color: Colors.blue.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(children: [
+          const Text('QUÉT MÃ CHUYỂN KHOẢN',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 10),
+          Container(
+            color: Colors.white,
+            padding: const EdgeInsets.all(10),
+            child: BarcodeWidget(
+              barcode: Barcode.qrCode(),
+              data: payload,
+              width: 230,
+              height: 230,
+              drawText: false,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(vnd(amount),
+              style: const TextStyle(
+                  fontSize: 24, fontWeight: FontWeight.w900,
+                  color: Colors.blue)),
+          Text('${receiver.bankName} • ${receiver.accountNumber}',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontWeight: FontWeight.bold)),
+          if (receiver.accountName.trim().isNotEmpty)
+            Text(receiver.accountName, textAlign: TextAlign.center),
+          Text('Nội dung: MCM $invoiceCode'),
+          const SizedBox(height: 6),
+          const Text(
+            'Khách chuyển vào tài khoản trên; loa thanh toán liên kết với '
+            'tài khoản sẽ tự thông báo tiền về.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+        ]),
+      ),
+    );
+  }
 }
 
 class ReportsPage extends StatefulWidget {
@@ -5202,14 +6375,82 @@ class StocktakePage extends StatefulWidget {
 }
 
 class _StocktakePageState extends State<StocktakePage> {
+  final searchController = TextEditingController();
+  String search = '';
+  String category = '';
+  List<String> categories = [];
+
+  @override
+  void initState() {
+    super.initState();
+    loadCategories();
+  }
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> loadCategories() async {
+    final rows = await StoreDb.instance.productCategories();
+    if (mounted) {
+      setState(() =>
+          categories = rows.map((row) => '${row['name']}').toList());
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Kiểm kho')),
-    body: FutureBuilder<List<Map<String, Object?>>>(
+    body: Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        child: TextField(
+          controller: searchController,
+          decoration: InputDecoration(
+            prefixIcon: const Icon(Icons.search),
+            hintText: 'Tên, mã hàng hoặc IMEI',
+            suffixIcon: IconButton(
+              tooltip: 'Quét mã / IMEI',
+              onPressed: scanStock,
+              icon: const Icon(Icons.qr_code_scanner),
+            ),
+          ),
+          onChanged: (value) =>
+              setState(() => search = value.trim().toLowerCase()),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: DropdownButtonFormField<String>(
+          initialValue: category,
+          decoration: const InputDecoration(
+            labelText: 'Phân loại hàng tồn',
+            prefixIcon: Icon(Icons.category_outlined),
+          ),
+          items: [
+            const DropdownMenuItem(
+                value: '', child: Text('Tất cả phân loại')),
+            ...categories.map((value) =>
+                DropdownMenuItem(value: value, child: Text(value))),
+          ],
+          onChanged: (value) => setState(() => category = value ?? ''),
+        ),
+      ),
+      Expanded(child: FutureBuilder<List<Map<String, Object?>>>(
       future: StoreDb.instance.products(),
       builder: (context, snap) {
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-        final rows = snap.data!;
+        final rows = snap.data!.where((product) {
+          final text = ('${product['name']} ${product['code']} '
+                  '${product['category']} ${product['imeis'] ?? ''}')
+              .toLowerCase();
+          final matchesSearch = search.isEmpty || text.contains(search);
+          final matchesCategory = category.isEmpty ||
+              '${product['category']}'.toLowerCase() == category.toLowerCase();
+          return matchesSearch && matchesCategory;
+        }).toList();
         if (rows.isEmpty) return const EmptyState(Icons.fact_check_outlined, 'Chưa có hàng hóa', 'Hãy tạo và nhập hàng trước khi kiểm kho.');
         return ListView(padding: const EdgeInsets.all(16), children: [
           const Text('Tồn kho hiện tại', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
@@ -5264,8 +6505,20 @@ class _StocktakePageState extends State<StocktakePage> {
           ),
         ]);
       },
-    ),
+    )),
+    ]),
   );
+
+  Future<void> scanStock() async {
+    final raw = await Navigator.push<String>(context,
+        MaterialPageRoute(builder: (_) => const ScanCodePage(
+          title: 'Quét hàng tồn / IMEI',
+        )));
+    if (raw == null || !mounted) return;
+    final value = extractImei(raw) ?? raw.trim();
+    searchController.text = value;
+    setState(() => search = value.toLowerCase());
+  }
 
   Future<void> count(Map<String, Object?> product) async {
     final actual = TextEditingController(text: '${product['stock']}');
@@ -5837,7 +7090,15 @@ class WarrantiesPage extends StatefulWidget {
 }
 
 class _WarrantiesPageState extends State<WarrantiesPage> {
+  final searchController = TextEditingController();
   String search = '';
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Tra cứu bảo hành')),
@@ -5845,9 +7106,15 @@ class _WarrantiesPageState extends State<WarrantiesPage> {
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
         child: TextField(
-          decoration: const InputDecoration(
-            prefixIcon: Icon(Icons.search),
+          controller: searchController,
+          decoration: InputDecoration(
+            prefixIcon: const Icon(Icons.search),
             hintText: 'Nhập IMEI, tên máy, tên khách hoặc SĐT',
+            suffixIcon: IconButton(
+              tooltip: 'Quét IMEI',
+              onPressed: scanWarranty,
+              icon: const Icon(Icons.qr_code_scanner),
+            ),
           ),
           onChanged: (value) => setState(() => search = value.trim().toLowerCase()),
         ),
@@ -5906,6 +7173,17 @@ class _WarrantiesPageState extends State<WarrantiesPage> {
       )),
     ]),
   );
+
+  Future<void> scanWarranty() async {
+    final raw = await Navigator.push<String>(context,
+        MaterialPageRoute(builder: (_) => const ScanCodePage(
+          title: 'Quét IMEI tra bảo hành',
+        )));
+    if (raw == null || !mounted) return;
+    final value = extractImei(raw) ?? raw.trim();
+    searchController.text = value;
+    setState(() => search = value.toLowerCase());
+  }
 }
 
 class WarrantyDetailPage extends StatefulWidget {
@@ -6392,6 +7670,439 @@ class _BackupPageState extends State<BackupPage> {
   }
 }
 
+class ProductLabelData {
+  const ProductLabelData({
+    required this.productName,
+    required this.detail,
+    required this.code,
+    required this.price,
+    required this.isImei,
+  });
+
+  final String productName;
+  final String detail;
+  final String code;
+  final int price;
+  final bool isImei;
+}
+
+ProductLabelData labelForSerial(
+    Map<String, Object?> product, Map<String, Object?> serial) {
+  final details = [
+    product['capacity'],
+    serial['color'],
+  ].map((value) => '${value ?? ''}'.trim())
+      .where((value) => value.isNotEmpty)
+      .join(' • ');
+  return ProductLabelData(
+    productName: '${product['name']}',
+    detail: details,
+    code: '${serial['imei']}',
+    price: (product['sale_price'] as num).toInt(),
+    isImei: true,
+  );
+}
+
+class LabelPaper extends StatelessWidget {
+  const LabelPaper({
+    super.key,
+    required this.label,
+    required this.showPrice,
+    this.width = 320,
+  });
+
+  final ProductLabelData label;
+  final bool showPrice;
+  final double width;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: width,
+        height: width * 0.75,
+        color: Colors.white,
+        padding: EdgeInsets.all(width * 0.035),
+        child: DefaultTextStyle(
+          style: TextStyle(
+              color: Colors.black, fontSize: width * 0.037, height: 1.05),
+          child: Column(children: [
+            Text('MINH CẢNH MOBILE',
+                maxLines: 1,
+                style: TextStyle(
+                    fontSize: width * 0.048,
+                    fontWeight: FontWeight.w900)),
+            SizedBox(height: width * 0.012),
+            Text(label.productName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: width * 0.052,
+                    fontWeight: FontWeight.w900)),
+            if (label.detail.isNotEmpty)
+              Text(label.detail,
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+            SizedBox(height: width * 0.012),
+            Expanded(
+              child: BarcodeWidget(
+                barcode: Barcode.code128(),
+                data: label.code,
+                drawText: false,
+                color: Colors.black,
+                backgroundColor: Colors.white,
+              ),
+            ),
+            SizedBox(height: width * 0.008),
+            Row(children: [
+              Expanded(child: Text(
+                '${label.isImei ? 'IMEI' : 'Mã'}: ${label.code}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w800),
+              )),
+              if (showPrice)
+                Text(vnd(label.price),
+                    style: TextStyle(
+                        fontSize: width * 0.048,
+                        fontWeight: FontWeight.w900)),
+            ]),
+          ]),
+        ),
+      );
+}
+
+class ProductLabelPrinter {
+  static Future<Uint8List> render(BuildContext context,
+      ProductLabelData label, bool showPrice) async {
+    final controller = ScreenshotController();
+    return controller.captureFromWidget(
+      InheritedTheme.captureAll(
+        context,
+        Material(
+          color: Colors.white,
+          child: MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.noScaling),
+            child: LabelPaper(label: label, showPrice: showPrice),
+          ),
+        ),
+      ),
+      delay: const Duration(milliseconds: 60),
+      pixelRatio: 1,
+    );
+  }
+
+  static Future<List<int>> thermalBytes(Uint8List png) async {
+    final decoded = img.decodeImage(png);
+    if (decoded == null) throw Exception('Không thể tạo ảnh tem');
+    final printable = img.copyResize(decoded,
+        width: 320, height: 240,
+        interpolation: img.Interpolation.average);
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(PaperSize.mm58, profile);
+    return <int>[
+      ...generator.reset(),
+      ...generator.imageRaster(printable, align: PosAlign.center),
+      ...generator.feed(1),
+    ];
+  }
+
+  static Future<void> print(BuildContext context,
+      List<ProductLabelData> labels, bool showPrice) async {
+    final mac =
+        await StoreDb.instance.getSetting('label_printer_bluetooth_mac') ?? '';
+    if (mac.isEmpty) {
+      throw Exception('Chưa chọn máy in tem Bluetooth 40×30');
+    }
+    if (!await PrintBluetoothThermal.bluetoothEnabled) {
+      throw Exception('Bluetooth đang tắt. Hãy bật Bluetooth rồi thử lại');
+    }
+    var connected = await PrintBluetoothThermal.connectionStatus;
+    if (!connected) {
+      connected = await PrintBluetoothThermal.connect(
+          macPrinterAddress: mac);
+    }
+    if (!connected) throw Exception('Không kết nối được máy in tem');
+    for (final label in labels) {
+      final png = await render(context, label, showPrice);
+      final ok = await PrintBluetoothThermal.writeBytes(
+          await thermalBytes(png));
+      if (!ok) throw Exception('Máy in không nhận dữ liệu tem');
+    }
+  }
+
+  static Future<void> share(BuildContext context,
+      List<ProductLabelData> labels, bool showPrice) async {
+    final document = pw.Document();
+    for (final label in labels) {
+      final png = await render(context, label, showPrice);
+      document.addPage(pw.Page(
+        pageFormat: PdfPageFormat(40 * PdfPageFormat.mm,
+            30 * PdfPageFormat.mm, marginAll: 0),
+        build: (_) => pw.Image(pw.MemoryImage(png), fit: pw.BoxFit.fill),
+      ));
+    }
+    final bytes = await document.save();
+    await SharePlus.instance.share(ShareParams(
+      files: [XFile.fromData(bytes, mimeType: 'application/pdf')],
+      fileNameOverrides: const ['Tem_40x30_Minh_Canh_Mobile.pdf'],
+      subject: 'Tem hàng hóa 40×30 Minh Cảnh Mobile',
+    ));
+  }
+}
+
+class LabelPreviewPage extends StatefulWidget {
+  const LabelPreviewPage({super.key, required this.labels});
+  final List<ProductLabelData> labels;
+
+  @override
+  State<LabelPreviewPage> createState() => _LabelPreviewPageState();
+}
+
+class _LabelPreviewPageState extends State<LabelPreviewPage> {
+  bool showPrice = true;
+  bool busy = false;
+  int index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    loadPreference();
+  }
+
+  Future<void> loadPreference() async {
+    final saved = await StoreDb.instance.getSetting('label_show_price');
+    if (mounted && saved != null) {
+      setState(() => showPrice = saved != '0');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Xem trước tem 40×30')),
+        body: ListView(padding: const EdgeInsets.all(16), children: [
+          Card(child: SwitchListTile(
+            title: const Text('Hiện giá bán trên tem'),
+            subtitle: Text(showPrice
+                ? 'Tem sẽ in giá bán'
+                : 'Tem chỉ in tên hàng và mã vạch/IMEI'),
+            value: showPrice,
+            onChanged: (value) async {
+              setState(() => showPrice = value);
+              await StoreDb.instance
+                  .setSetting('label_show_price', value ? '1' : '0');
+            },
+          )),
+          const SizedBox(height: 14),
+          SizedBox(
+            height: 255,
+            child: PageView.builder(
+              itemCount: widget.labels.length,
+              onPageChanged: (value) => setState(() => index = value),
+              itemBuilder: (context, itemIndex) => Center(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.black26),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black12, blurRadius: 8),
+                    ],
+                  ),
+                  child: LabelPaper(
+                    label: widget.labels[itemIndex],
+                    showPrice: showPrice,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text('Tem ${index + 1}/${widget.labels.length} • Khổ 40×30 mm',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.black54)),
+          const SizedBox(height: 18),
+          OutlinedButton.icon(
+            onPressed: busy ? null : share,
+            icon: const Icon(Icons.picture_as_pdf_outlined),
+            label: const Text('Chia sẻ PDF tem 40×30'),
+          ),
+          const SizedBox(height: 10),
+          FilledButton.icon(
+            onPressed: busy ? null : printLabels,
+            icon: busy
+                ? const SizedBox(width: 18, height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.print),
+            label: Text(busy
+                ? 'Đang in'
+                : 'In ${widget.labels.length} tem qua Bluetooth'),
+          ),
+        ]),
+      );
+
+  Future<void> printLabels() async {
+    setState(() => busy = true);
+    try {
+      await ProductLabelPrinter.print(context, widget.labels, showPrice);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Đã gửi tem tới máy in')));
+      }
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  Future<void> share() async {
+    setState(() => busy = true);
+    try {
+      await ProductLabelPrinter.share(context, widget.labels, showPrice);
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+    if (mounted) setState(() => busy = false);
+  }
+}
+
+class LabelPrinterSettingsPage extends StatefulWidget {
+  const LabelPrinterSettingsPage({super.key});
+
+  @override
+  State<LabelPrinterSettingsPage> createState() =>
+      _LabelPrinterSettingsPageState();
+}
+
+class _LabelPrinterSettingsPageState
+    extends State<LabelPrinterSettingsPage> {
+  String bluetoothMac = '';
+  String bluetoothName = '';
+  List<BluetoothInfo> devices = [];
+  bool loading = true;
+  bool searching = false;
+  bool testing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    bluetoothMac = await StoreDb.instance
+            .getSetting('label_printer_bluetooth_mac') ??
+        '';
+    bluetoothName = await StoreDb.instance
+            .getSetting('label_printer_bluetooth_name') ??
+        '';
+    if (mounted) setState(() => loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Máy in tem 40×30')),
+        body: loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView(padding: const EdgeInsets.all(16), children: [
+                const Card(child: Padding(
+                  padding: EdgeInsets.all(14),
+                  child: Text(
+                    'Ghép đôi máy in tem trong Cài đặt Bluetooth của điện '
+                    'thoại trước, sau đó chọn máy tại đây.',
+                  ),
+                )),
+                const SizedBox(height: 14),
+                Text(bluetoothName.isEmpty
+                    ? 'Chưa chọn máy in tem'
+                    : 'Đã chọn: $bluetoothName\n$bluetoothMac'),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: searching ? null : searchBluetooth,
+                  icon: searching
+                      ? const SizedBox(width: 18, height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.bluetooth_searching),
+                  label: Text(searching ? 'Đang tìm' : 'Tìm máy đã ghép đôi'),
+                ),
+                ...devices.map((device) => RadioListTile<String>(
+                  value: device.macAdress,
+                  groupValue: bluetoothMac,
+                  title: Text(device.name.isEmpty
+                      ? 'Máy in Bluetooth'
+                      : device.name),
+                  subtitle: Text(device.macAdress),
+                  onChanged: (value) => setState(() {
+                    bluetoothMac = value ?? '';
+                    bluetoothName = device.name.isEmpty
+                        ? 'Máy in Bluetooth'
+                        : device.name;
+                  }),
+                )),
+                const SizedBox(height: 14),
+                FilledButton.icon(
+                  onPressed: bluetoothMac.isEmpty ? null : save,
+                  icon: const Icon(Icons.save),
+                  label: const Text('Lưu máy in tem'),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: testing || bluetoothMac.isEmpty ? null : test,
+                  icon: testing
+                      ? const SizedBox(width: 18, height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.print),
+                  label: const Text('In thử tem 40×30'),
+                ),
+              ]),
+      );
+
+  Future<void> searchBluetooth() async {
+    setState(() => searching = true);
+    try {
+      if (!await PrintBluetoothThermal.bluetoothEnabled) {
+        throw Exception('Bluetooth đang tắt');
+      }
+      final rows = await PrintBluetoothThermal.pairedBluetooths;
+      if (mounted) setState(() => devices = rows);
+      if (rows.isEmpty) {
+        throw Exception('Không thấy máy Bluetooth đã ghép đôi');
+      }
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+    if (mounted) setState(() => searching = false);
+  }
+
+  Future<void> save() async {
+    await StoreDb.instance
+        .setSetting('label_printer_bluetooth_mac', bluetoothMac);
+    await StoreDb.instance
+        .setSetting('label_printer_bluetooth_name', bluetoothName);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đã lưu máy in tem')));
+    }
+  }
+
+  Future<void> test() async {
+    setState(() => testing = true);
+    try {
+      await save();
+      if (mounted) {
+        await ProductLabelPrinter.print(context, const [
+          ProductLabelData(
+            productName: 'TEM IN THỬ',
+            detail: 'Khổ 40×30 mm',
+            code: 'SP000001',
+            price: 123000,
+            isImei: false,
+          ),
+        ], true);
+      }
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+    if (mounted) setState(() => testing = false);
+  }
+}
+
 class ReceiptItem {
   const ReceiptItem({
     required this.name,
@@ -6564,6 +8275,18 @@ class ReceiptPaper extends StatelessWidget {
         Text('Mã phiếu: ${receipt.code}', textAlign: TextAlign.center,
             style: const TextStyle(fontWeight: FontWeight.w700)),
         Text(receipt.date, textAlign: TextAlign.center),
+        const SizedBox(height: 7),
+        SizedBox(
+          height: 42,
+          width: 230,
+          child: BarcodeWidget(
+            barcode: Barcode.code128(),
+            data: receipt.code,
+            drawText: false,
+            color: Colors.black,
+            backgroundColor: Colors.white,
+          ),
+        ),
         const SizedBox(height: 9),
         _receiptRule(),
         const SizedBox(height: 7),
@@ -7068,6 +8791,48 @@ class MenuGroup extends StatelessWidget {
     Padding(padding: const EdgeInsets.all(10), child: Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
     ...items.map((e) => ListTile(leading: Icon(e.icon, color: Theme.of(context).colorScheme.primary), title: Text(e.title), trailing: const Icon(Icons.chevron_right), onTap: e.onTap)),
   ])));
+}
+
+String newInvoiceCode() {
+  final now = DateTime.now();
+  return 'HD${DateFormat('yyyyMMddHHmmssSSS').format(now)}';
+}
+
+Future<String?> promptNewCategory(BuildContext context) async {
+  final controller = TextEditingController();
+  final value = await showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Tạo phân loại mới'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        textCapitalization: TextCapitalization.sentences,
+        decoration: const InputDecoration(
+          labelText: 'Tên phân loại',
+          hintText: 'Ví dụ: iPhone, Samsung, Cáp sạc…',
+        ),
+        onSubmitted: (text) {
+          if (text.trim().isNotEmpty) Navigator.pop(dialogContext, text.trim());
+        },
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Hủy'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final text = controller.text.trim();
+            if (text.isNotEmpty) Navigator.pop(dialogContext, text);
+          },
+          child: const Text('Tạo'),
+        ),
+      ],
+    ),
+  );
+  controller.dispose();
+  return value;
 }
 
 String statusName(String status) => switch (status) {

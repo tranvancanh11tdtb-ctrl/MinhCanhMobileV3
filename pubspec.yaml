@@ -1,7 +1,7 @@
 name: minh_canh_mobile_v3
 description: Ung dung quan ly cua hang Minh Canh Mobile, offline.
 publish_to: none
-version: 0.9.0+9
+version: 3.9.0+39
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -21,6 +21,8 @@ dependencies:
   path_provider: ^2.1.5
   share_plus: ^12.0.1
   cross_file: ^0.3.5+1
+  mobile_scanner: ^7.4.0
+  barcode_widget: ^2.0.4
 
 dev_dependencies:
   flutter_test:
