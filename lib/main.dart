@@ -60,7 +60,7 @@ class StoreDb {
 
   Future<Database> _open() async {
     final file = p.join(await getDatabasesPath(), 'minh_canh_mobile_v3.db');
-    return openDatabase(file, version: 4, onConfigure: (db) async {
+    return openDatabase(file, version: 5, onConfigure: (db) async {
       await db.execute('PRAGMA foreign_keys = ON');
     }, onCreate: (db, version) async {
       await db.execute('''CREATE TABLE products(
@@ -147,10 +147,12 @@ class StoreDb {
       await _createV2Tables(db);
       await _createV3Tables(db);
       await _createV4Tables(db);
+      await _createV5Tables(db);
     }, onUpgrade: (db, oldVersion, newVersion) async {
       if (oldVersion < 2) await _createV2Tables(db);
       if (oldVersion < 3) await _createV3Tables(db);
       if (oldVersion < 4) await _createV4Tables(db);
+      if (oldVersion < 5) await _createV5Tables(db);
     });
   }
 
@@ -248,6 +250,14 @@ class StoreDb {
     )''');
     await db.execute('''CREATE INDEX IF NOT EXISTS idx_debt_adjustments_party
       ON debt_adjustments(party_type, party_id, created_at)''');
+  }
+
+  Future<void> _createV5Tables(DatabaseExecutor db) async {
+    final repairColumns = await db.rawQuery('PRAGMA table_info(repairs)');
+    if (!repairColumns.any((column) => column['name'] == 'hidden')) {
+      await db.execute('''ALTER TABLE repairs ADD COLUMN
+        hidden INTEGER NOT NULL DEFAULT 0''');
+    }
   }
 
   Future<void> _backfillDirectories(DatabaseExecutor db) async {
@@ -1066,7 +1076,8 @@ class StoreDb {
       String name, String phone) async {
     final db = await database;
     return db.query('repairs',
-        where: "LOWER(TRIM(customer))=LOWER(?) AND TRIM(phone)=? AND status!='cancelled'",
+        where: "LOWER(TRIM(customer))=LOWER(?) AND TRIM(phone)=? "
+            "AND status!='cancelled' AND hidden=0",
         whereArgs: [name.trim(), phone.trim()], orderBy: 'received_at DESC');
   }
 
@@ -1151,7 +1162,8 @@ class StoreDb {
 
   Future<List<Map<String, Object?>>> repairs() async {
     final db = await database;
-    return db.query('repairs', orderBy: 'id DESC');
+    return db.query('repairs',
+        where: 'hidden=0', orderBy: 'id DESC');
   }
 
   Future<void> addRepair({
@@ -1246,8 +1258,9 @@ class StoreDb {
 
   Future<void> deleteRepair(int id) async {
     final db = await database;
-    final deleted = await db.delete('repairs', where: 'id=?', whereArgs: [id]);
-    if (deleted == 0) throw Exception('Không tìm thấy phiếu sửa chữa');
+    final hidden = await db.update('repairs', {'hidden': 1},
+        where: 'id=?', whereArgs: [id]);
+    if (hidden == 0) throw Exception('Không tìm thấy phiếu sửa chữa');
   }
 
   Future<List<Map<String, Object?>>> cashEntries() async {
@@ -5677,7 +5690,7 @@ class _RepairDetailPageState extends State<RepairDetailPage> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Xóa phiếu sửa chữa?'),
         content: const Text(
-            'Phiếu sẽ bị xóa hẳn. Báo cáo doanh thu và lợi nhuận sẽ tự tính lại theo các phiếu còn lại.'),
+            'Phiếu sẽ biến mất khỏi danh sách nhưng số lượng hàng, doanh thu và lợi nhuận đã ghi nhận vẫn được giữ nguyên.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
@@ -5685,7 +5698,7 @@ class _RepairDetailPageState extends State<RepairDetailPage> {
           FilledButton(
               style: FilledButton.styleFrom(backgroundColor: Colors.red),
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Xóa hẳn')),
+              child: const Text('Xóa khỏi danh sách')),
         ],
       ),
     );
@@ -6177,7 +6190,7 @@ class _WarrantyDetailPageState extends State<WarrantyDetailPage> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Xóa phiếu bảo hành?'),
         content: const Text(
-            'Lần tiếp nhận này sẽ bị xóa hẳn. Thao tác không ảnh hưởng doanh thu và lợi nhuận.'),
+            'Lần tiếp nhận này sẽ bị xóa khỏi danh sách. Số lượng hàng, doanh thu và lợi nhuận không thay đổi.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),
