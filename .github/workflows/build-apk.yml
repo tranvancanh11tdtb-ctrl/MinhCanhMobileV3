@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - agent/bao-cao-v3
 
 permissions:
   contents: write
