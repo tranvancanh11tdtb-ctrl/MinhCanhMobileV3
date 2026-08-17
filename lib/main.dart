@@ -1234,10 +1234,18 @@ class _PurchaseFormState extends State<PurchaseForm> {
   void initState() { super.initState(); product = widget.initialProduct; _syncSerials(); }
   void _syncSerials() {
     if (product?['track_imei'] == 1) {
-      if (quantity < 1) quantity = 1;
-      while (serials.length < quantity) serials.add(SerialDraft());
-      while (serials.length > quantity) serials.removeLast();
-    } else { serials.clear(); }
+      if (quantity < 1) {
+        quantity = 1;
+      }
+      while (serials.length < quantity) {
+        serials.add(SerialDraft());
+      }
+      while (serials.length > quantity) {
+        serials.removeLast();
+      }
+    } else {
+      serials.clear();
+    }
   }
 
   void _addSerial() => setState(() {
@@ -1468,9 +1476,13 @@ class _InvoicesPageState extends State<InvoicesPage> {
             '${formatDateTime(sale['created_at'])}';
         return haystack.toLowerCase().contains(search);
       }).toList();
-      if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-      if (rows.isEmpty) return Center(child: Text(search.isEmpty
-          ? 'Chưa có hóa đơn' : 'Không tìm thấy hóa đơn phù hợp'));
+      if (!snap.hasData) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      if (rows.isEmpty) {
+        return Center(child: Text(search.isEmpty
+            ? 'Chưa có hóa đơn' : 'Không tìm thấy hóa đơn phù hợp'));
+      }
       return ListView.separated(padding: const EdgeInsets.all(16), itemCount: rows.length, separatorBuilder: (_, __) => const SizedBox(height: 8), itemBuilder: (context, i) {
         final s = rows[i]; final cancelled = s['status'] == 'cancelled';
         return Card(child: ListTile(
@@ -1705,10 +1717,14 @@ class _StocktakePageState extends State<StocktakePage> {
           FutureBuilder<List<Map<String, Object?>>>(
             future: StoreDb.instance.stocktakeHistory(),
             builder: (context, historySnap) {
-              if (!historySnap.hasData) return const Center(child: CircularProgressIndicator());
+              if (!historySnap.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
               final history = historySnap.data!;
-              if (history.isEmpty) return const Card(child: Padding(
-                  padding: EdgeInsets.all(18), child: Text('Chưa có phiếu kiểm kho.')));
+              if (history.isEmpty) {
+                return const Card(child: Padding(
+                    padding: EdgeInsets.all(18), child: Text('Chưa có phiếu kiểm kho.')));
+              }
               return Column(children: history.map((h) {
                 final difference = h['difference'] as int;
                 return Padding(padding: const EdgeInsets.only(bottom: 8), child: Card(child: ListTile(
@@ -2067,7 +2083,7 @@ class _WarrantiesPageState extends State<WarrantiesPage> {
               final statusText = noWarranty
                   ? 'Hóa đơn không có bảo hành'
                   : active
-                      ? 'Còn bảo hành đến ${DateFormat('dd/MM/yyyy').format(end!)}'
+                      ? 'Còn bảo hành đến ${DateFormat('dd/MM/yyyy').format(end)}'
                       : 'Đã hết bảo hành ${end == null ? '' : 'từ ${DateFormat('dd/MM/yyyy').format(end)}'}';
               final statusColor = noWarranty ? Colors.grey : (active ? Colors.green : Colors.red);
               return Card(child: ListTile(
