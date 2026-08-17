@@ -8,7 +8,6 @@ on:
   push:
     branches:
       - main
-      - agent/in-chia-se-phieu
 
 permissions:
   contents: write
