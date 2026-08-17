@@ -7,15 +7,45 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Download source
         uses: actions/checkout@v4
+
+      - name: Fix Flutter source compatibility
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('lib/main.dart')
+          text = source.read_text(encoding='utf-8')
+          replacements = [
+              ("import 'package:path/path.dart';", "import 'package:path/path.dart' as p;"),
+              ("final file = join(", "final file = p.join("),
+              ("\n          value: product?['id'] as int?,", "\n          initialValue: product?['id'] as int?,"),
+              ("DropdownButtonFormField<String>(value: payment", "DropdownButtonFormField<String>(initialValue: payment"),
+              ("labelText: 'Chọn hàng còn tồn'), value:", "labelText: 'Chọn hàng còn tồn'), initialValue:"),
+              ("labelText: 'Chọn IMEI *'), value:", "labelText: 'Chọn IMEI *'), initialValue:"),
+              ("DropdownButtonFormField<int>(value: warranty", "DropdownButtonFormField<int>(initialValue: warranty"),
+          ]
+          for old, new in replacements:
+              text = text.replace(old, new)
+          source.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Save source fix
+        shell: bash
+        run: |
+          git config user.name "MinhCanhMobile Builder"
+          git config user.email "actions@users.noreply.github.com"
+          git add lib/main.dart
+          git diff --cached --quiet || git commit -m "Fix Flutter source compatibility"
+          git push
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
