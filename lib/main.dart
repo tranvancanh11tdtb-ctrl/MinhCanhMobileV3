@@ -3140,8 +3140,9 @@ class InvoiceDetailPage extends StatelessWidget {
     try {
       await StoreDb.instance.deleteSale(saleId);
       if (context.mounted) {
+        final messenger = ScaffoldMessenger.of(context);
         Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
+        messenger.showSnackBar(
           const SnackBar(content: Text('Đã xóa hóa đơn và hoàn lại tồn kho')),
         );
       }
