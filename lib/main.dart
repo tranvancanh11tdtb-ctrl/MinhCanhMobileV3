@@ -269,7 +269,8 @@ class StoreDb {
       GROUP BY LOWER(TRIM(supplier))''');
   }
 
-  Future<List<Map<String, Object?>>> products() async {
+  Future<List<Map<String, Object?>>> products(
+      {bool includeInactive = false}) async {
     final db = await database;
     return db.rawQuery('''SELECT p.*,
       CASE WHEN p.track_imei=1 THEN
@@ -277,7 +278,9 @@ class StoreDb {
       ELSE p.quantity END AS stock,
       (SELECT GROUP_CONCAT(s.imei, ' ') FROM serial_units s
        WHERE s.product_id=p.id) AS imeis
-      FROM products p WHERE p.active=1 ORDER BY p.id DESC''');
+      FROM products p
+      ${includeInactive ? '' : 'WHERE p.active=1'}
+      ORDER BY p.active DESC, p.id DESC''');
   }
 
   Future<Map<String, Object?>> product(int id) async {
@@ -326,15 +329,32 @@ class StoreDb {
     await db.update('products', values, where: 'id=?', whereArgs: [id]);
   }
 
+  Future<void> setProductActive(int id, bool active) async {
+    final db = await database;
+    final changed = await db.update(
+      'products',
+      {'active': active ? 1 : 0},
+      where: 'id=?',
+      whereArgs: [id],
+    );
+    if (changed == 0) throw Exception('Không tìm thấy hàng hóa');
+  }
+
   Future<void> deleteProduct(int id) async {
     final db = await database;
     final used = Sqflite.firstIntValue(await db.rawQuery(
           '''SELECT (SELECT COUNT(*) FROM purchase_items WHERE product_id=?) +
-          (SELECT COUNT(*) FROM sale_items WHERE product_id=?)''',
-          [id, id],
+          (SELECT COUNT(*) FROM sale_items WHERE product_id=?) +
+          (SELECT COUNT(*) FROM serial_units WHERE product_id=?) +
+          (SELECT COUNT(*) FROM inventory_movements WHERE product_id=?) +
+          (SELECT COUNT(*) FROM stocktakes WHERE product_id=?)''',
+          [id, id, id, id, id],
         )) ??
         0;
-    if (used > 0) throw Exception('Hàng đã có giao dịch, chỉ có thể ngừng kinh doanh');
+    if (used > 0) {
+      throw Exception(
+          'Hàng đã có tồn kho hoặc giao dịch, chỉ có thể ngừng kinh doanh');
+    }
     await db.delete('products', where: 'id=?', whereArgs: [id]);
   }
 
@@ -1632,32 +1652,111 @@ class ProductsPage extends StatefulWidget {
 
 class _ProductsPageState extends State<ProductsPage> {
   String search = '';
+  bool showInactive = false;
+
   @override
   Widget build(BuildContext context) => Column(children: [
-        PageHeader('Hàng hóa', action: IconButton(icon: const Icon(Icons.add_circle, size: 34), onPressed: _add)),
+        PageHeader('Hàng hóa', action: IconButton(
+          tooltip: 'Thêm hàng hóa',
+          icon: const Icon(Icons.add_circle, size: 34),
+          onPressed: _add,
+        )),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: TextField(decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Tên, mã hàng hoặc IMEI'), onChanged: (v) => setState(() => search = v.toLowerCase())),
+          child: TextField(
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search),
+              hintText: 'Tên, mã hàng hoặc IMEI',
+            ),
+            onChanged: (v) => setState(() => search = v.toLowerCase()),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(
+                  value: false,
+                  icon: Icon(Icons.storefront),
+                  label: Text('Đang bán'),
+                ),
+                ButtonSegment(
+                  value: true,
+                  icon: Icon(Icons.pause_circle_outline),
+                  label: Text('Ngừng KD'),
+                ),
+              ],
+              selected: {showInactive},
+              onSelectionChanged: (values) =>
+                  setState(() => showInactive = values.first),
+            ),
+          ),
         ),
         const SizedBox(height: 10),
         Expanded(child: FutureBuilder<List<Map<String, Object?>>>(
-          future: StoreDb.instance.products(),
+          future: StoreDb.instance.products(includeInactive: true),
           builder: (context, snap) {
-            final rows = (snap.data ?? []).where((p) =>
-                '${p['name']} ${p['code']} ${p['imeis'] ?? ''}'.toLowerCase().contains(search)).toList();
-            if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-            if (rows.isEmpty) return const Center(child: Text('Chưa có hàng hóa\nBấm dấu + để tạo mẫu hàng', textAlign: TextAlign.center));
+            if (!snap.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final rows = snap.data!.where((p) {
+              final inactive = p['active'] != 1;
+              final matchesStatus = showInactive == inactive;
+              final matchesSearch =
+                  '${p['name']} ${p['code']} ${p['imeis'] ?? ''}'
+                      .toLowerCase()
+                      .contains(search);
+              return matchesStatus && matchesSearch;
+            }).toList();
+            if (rows.isEmpty) {
+              return Center(child: Text(
+                showInactive
+                    ? 'Không có hàng hóa ngừng kinh doanh'
+                    : 'Chưa có hàng hóa\nBấm dấu + để tạo mẫu hàng',
+                textAlign: TextAlign.center,
+              ));
+            }
             return ListView.separated(
               padding: const EdgeInsets.all(16),
               itemCount: rows.length,
               separatorBuilder: (_, __) => const SizedBox(height: 8),
               itemBuilder: (context, i) {
                 final p = rows[i];
+                final active = p['active'] == 1;
                 return Card(child: ListTile(
-                  leading: const CircleAvatar(child: Icon(Icons.phone_android)),
-                  title: Text('${p['name']}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text('${p['code']} • Tồn: ${p['stock']}'),
-                  trailing: Text(vnd(p['sale_price'] as int), style: const TextStyle(fontWeight: FontWeight.bold)),
+                  leading: CircleAvatar(
+                    backgroundColor: active
+                        ? Theme.of(context).colorScheme.primaryContainer
+                        : Colors.grey.shade200,
+                    child: Icon(
+                      active ? Icons.phone_android : Icons.block,
+                      color: active
+                          ? Theme.of(context).colorScheme.primary
+                          : Colors.grey,
+                    ),
+                  ),
+                  title: Text(
+                    '${p['name']}',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: active ? null : Colors.grey.shade700,
+                    ),
+                  ),
+                  subtitle: Text(
+                    '${p['code']} • Tồn: ${p['stock']}\n'
+                    '${active ? 'Đang kinh doanh' : 'Ngừng kinh doanh'}',
+                  ),
+                  isThreeLine: true,
+                  trailing: Text(
+                    vnd(p['sale_price'] as int),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: active ? null : Colors.grey,
+                    ),
+                  ),
                   onTap: () => _detail(p),
                 ));
               },
@@ -1667,12 +1766,29 @@ class _ProductsPageState extends State<ProductsPage> {
       ]);
 
   Future<void> _add() async {
-    final changed = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => const ProductForm()));
-    if (changed == true) { setState(() {}); widget.onChanged(); }
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => const ProductForm()),
+    );
+    if (changed == true) {
+      setState(() {});
+      widget.onChanged();
+    }
   }
 
   Future<void> _detail(Map<String, Object?> p) async {
-    await Navigator.push(context, MaterialPageRoute(builder: (_) => ProductDetail(product: p, onChanged: () { setState(() {}); widget.onChanged(); })));
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ProductDetail(
+          product: p,
+          onChanged: () {
+            setState(() {});
+            widget.onChanged();
+          },
+        ),
+      ),
+    );
     setState(() {});
   }
 }
@@ -1749,42 +1865,145 @@ class _ProductDetailState extends State<ProductDetail> {
   Widget build(BuildContext context) {
     final p = product;
     final tracks = p['track_imei'] == 1;
+    final active = p['active'] == 1;
     return Scaffold(
       appBar: AppBar(title: Text('${p['name']}'), actions: [
         IconButton(
-            tooltip: 'Sửa thông tin',
-            icon: const Icon(Icons.edit_outlined),
-            onPressed: edit),
-        IconButton(
-            tooltip: 'Xóa hàng hóa',
+          tooltip: 'Sửa thông tin',
+          icon: const Icon(Icons.edit_outlined),
+          onPressed: edit,
+        ),
+      ]),
+      floatingActionButton: active
+          ? FloatingActionButton.extended(
+              onPressed: purchase,
+              icon: const Icon(Icons.add_shopping_cart),
+              label: const Text('Nhập thêm hàng'),
+            )
+          : null,
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Expanded(child: Text(
+                    '${p['name']}',
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  )),
+                  Chip(
+                    avatar: Icon(
+                      active ? Icons.check_circle : Icons.pause_circle,
+                      size: 18,
+                      color: active ? Colors.green : Colors.orange,
+                    ),
+                    label: Text(
+                      active ? 'Đang kinh doanh' : 'Ngừng kinh doanh',
+                    ),
+                  ),
+                ]),
+                Text('Mã: ${p['code']}'),
+                Text('Giá bán: ${vnd(p['sale_price'] as int)}'),
+                if (!tracks)
+                  Text('Giá nhập bình quân: ${vnd(p['avg_cost'] as int)}'),
+                Text(tracks
+                    ? 'Quản lý theo Serial/IMEI'
+                    : 'Quản lý theo số lượng'),
+              ],
+            ),
+          )),
+          if (!active) ...[
+            const SizedBox(height: 12),
+            Card(
+              color: Colors.orange.shade50,
+              child: const Padding(
+                padding: EdgeInsets.all(14),
+                child: Row(children: [
+                  Icon(Icons.info_outline, color: Colors.orange),
+                  SizedBox(width: 10),
+                  Expanded(child: Text(
+                    'Hàng hóa đang ngừng kinh doanh nên không xuất hiện khi '
+                    'bán hoặc nhập hàng mới. Tồn kho và lịch sử vẫn được giữ.',
+                  )),
+                ]),
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Text(
+            tracks ? 'Danh sách IMEI' : 'Tồn kho',
+            style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          if (tracks)
+            FutureBuilder<List<Map<String, Object?>>>(
+              future: StoreDb.instance.serials(p['id'] as int),
+              builder: (context, snap) {
+                final rows = snap.data ?? [];
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (rows.isEmpty) {
+                  return const Card(child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text('Chưa nhập IMEI'),
+                  ));
+                }
+                return Column(children: rows.map((s) => Card(child: ListTile(
+                  title: Text('${s['imei']}'),
+                  subtitle: Text(
+                    '${s['color']} • ${s['condition_text']} • '
+                    'Giá nhập ${vnd(s['cost'] as int)}\n'
+                    '${statusName('${s['status']}')}',
+                  ),
+                  isThreeLine: true,
+                  trailing: const Icon(Icons.edit_outlined),
+                  onTap: () => editSerial(s),
+                ))).toList());
+              },
+            )
+          else
+            Card(child: ListTile(
+              title: const Text('Số lượng hiện tại'),
+              trailing: Text(
+                '${p['stock']}',
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            )),
+          const SizedBox(height: 18),
+          if (active)
+            OutlinedButton.icon(
+              onPressed: toggleActive,
+              icon: const Icon(Icons.pause_circle_outline),
+              label: const Text('Ngừng kinh doanh'),
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.orange),
+            )
+          else
+            FilledButton.icon(
+              onPressed: toggleActive,
+              icon: const Icon(Icons.play_circle_outline),
+              label: const Text('Kinh doanh trở lại'),
+              style: FilledButton.styleFrom(backgroundColor: Colors.green),
+            ),
+          const SizedBox(height: 8),
+          TextButton.icon(
+            onPressed: delete,
             icon: const Icon(Icons.delete_outline),
-            onPressed: delete),
-      ]),
-      floatingActionButton: FloatingActionButton.extended(onPressed: purchase, icon: const Icon(Icons.add_shopping_cart), label: const Text('Nhập thêm hàng')),
-      body: ListView(padding: const EdgeInsets.all(16), children: [
-        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('${p['name']}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-          Text('Mã: ${p['code']}'), Text('Giá bán: ${vnd(p['sale_price'] as int)}'),
-          if (!tracks) Text('Giá nhập bình quân: ${vnd(p['avg_cost'] as int)}'),
-          Text(tracks ? 'Quản lý theo Serial/IMEI' : 'Quản lý theo số lượng'),
-        ]))),
-        const SizedBox(height: 14),
-        Text(tracks ? 'Danh sách IMEI' : 'Tồn kho', style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        if (tracks) FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.serials(p['id'] as int), builder: (context, snap) {
-          final rows = snap.data ?? [];
-          if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-          if (rows.isEmpty) return const Card(child: Padding(padding: EdgeInsets.all(24), child: Text('Chưa nhập IMEI')));
-          return Column(children: rows.map((s) => Card(child: ListTile(
-            title: Text('${s['imei']}'),
-            subtitle: Text('${s['color']} • ${s['condition_text']} • Giá nhập ${vnd(s['cost'] as int)}\n${statusName('${s['status']}')}'),
-            isThreeLine: true,
-            trailing: const Icon(Icons.edit_outlined),
-            onTap: () => editSerial(s),
-          ))).toList());
-        }) else Card(child: ListTile(title: const Text('Số lượng hiện tại'), trailing: Text('${p['stock']}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)))),
-        const SizedBox(height: 80),
-      ]),
+            label: const Text('Xóa hàng hóa'),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+          ),
+          const SizedBox(height: 80),
+        ],
+      ),
     );
   }
 
@@ -1794,8 +2013,10 @@ class _ProductDetailState extends State<ProductDetail> {
   }
 
   Future<void> edit() async {
-    final changed = await Navigator.push<bool>(context,
-        MaterialPageRoute(builder: (_) => ProductEditForm(product: product)));
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => ProductEditForm(product: product)),
+    );
     if (changed == true) {
       await reload();
       widget.onChanged();
@@ -1803,8 +2024,10 @@ class _ProductDetailState extends State<ProductDetail> {
   }
 
   Future<void> editSerial(Map<String, Object?> serial) async {
-    final changed = await Navigator.push<bool>(context,
-        MaterialPageRoute(builder: (_) => SerialEditForm(serial: serial)));
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => SerialEditForm(serial: serial)),
+    );
     if (changed == true) {
       setState(() {});
       widget.onChanged();
@@ -1812,16 +2035,63 @@ class _ProductDetailState extends State<ProductDetail> {
   }
 
   Future<void> purchase() async {
-    final ok = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => PurchaseForm(initialProduct: product)));
+    final ok = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => PurchaseForm(
+        initialProduct: product,
+      )),
+    );
     if (ok == true) {
       await reload();
       widget.onChanged();
     }
   }
+
+  Future<void> toggleActive() async {
+    final active = product['active'] == 1;
+    final accepted = await confirm(
+      context,
+      active ? 'Ngừng kinh doanh' : 'Kinh doanh trở lại',
+      active
+          ? 'Hàng hóa sẽ không còn xuất hiện khi bán hoặc nhập hàng mới. '
+              'Tồn kho và toàn bộ lịch sử vẫn được giữ nguyên.'
+          : 'Hàng hóa sẽ xuất hiện trở lại khi bán và nhập hàng.',
+    );
+    if (!accepted) return;
+    try {
+      await StoreDb.instance.setProductActive(
+        product['id'] as int,
+        !active,
+      );
+      await reload();
+      widget.onChanged();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(active
+              ? 'Đã ngừng kinh doanh hàng hóa'
+              : 'Đã kinh doanh trở lại'),
+        ));
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
   Future<void> delete() async {
-    if (!await confirm(context, 'Xóa hàng hóa', 'Bạn có chắc chắn muốn xóa hàng hóa này không?')) return;
-    try { await StoreDb.instance.deleteProduct(product['id'] as int); widget.onChanged(); if (mounted) Navigator.pop(context); }
-    catch (e) { showError(context, e); }
+    final accepted = await confirm(
+      context,
+      'Xóa hàng hóa',
+      'Chỉ hàng chưa có tồn kho hoặc giao dịch mới xóa được. '
+          'Bạn có chắc chắn muốn xóa hàng hóa này không?',
+    );
+    if (!accepted) return;
+    try {
+      await StoreDb.instance.deleteProduct(product['id'] as int);
+      widget.onChanged();
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
   }
 }
 
