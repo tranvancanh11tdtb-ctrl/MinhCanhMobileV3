@@ -2,6 +2,9 @@ name: Build Android APK
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -44,8 +47,12 @@ jobs:
           git config user.name "MinhCanhMobile Builder"
           git config user.email "actions@users.noreply.github.com"
           git add lib/main.dart
-          git diff --cached --quiet || git commit -m "Fix Flutter source compatibility"
-          git push
+          if ! git diff --cached --quiet; then
+            git commit -m "Fix Flutter source compatibility"
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              git push
+            fi
+          fi
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
@@ -55,6 +62,26 @@ jobs:
 
       - name: Generate Android project
         run: flutter create --platforms android --org vn.minhcanhmobile .
+
+      - name: Configure Android printer permissions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text(encoding='utf-8')
+          permissions = '''    <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+          '''
+          if 'android.permission.BLUETOOTH_CONNECT' not in text:
+              text = text.replace('<manifest xmlns:android="http://schemas.android.com/apk/res/android">',
+                                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n' + permissions)
+          manifest.write_text(text, encoding='utf-8')
+          PY
 
       - name: Install dependencies
         run: flutter pub get
@@ -89,4 +116,3 @@ jobs:
         with:
           name: Android-APK-Signer
           path: build/apksigner
-

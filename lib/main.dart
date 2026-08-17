@@ -1,9 +1,19 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:cross_file/cross_file.dart';
+import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
+import 'package:screenshot/screenshot.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
 
 void main() async {
@@ -1937,7 +1947,15 @@ class InvoiceDetailPage extends StatelessWidget {
         final items = snap.data!['items'] as List<Map<String, Object?>>;
         final months = sale['warranty_months'] as int;
         final soldAt = parseDate(sale['created_at']);
+        final receipt = ReceiptDocument.invoice(sale, items);
         return ListView(padding: const EdgeInsets.all(16), children: [
+          FilledButton.icon(
+            onPressed: () => Navigator.push(context, MaterialPageRoute(
+                builder: (_) => ReceiptPreviewPage(receipt: receipt))),
+            icon: const Icon(Icons.print),
+            label: const Text('In / chia sẻ hóa đơn'),
+          ),
+          const SizedBox(height: 12),
           Card(child: Padding(padding: const EdgeInsets.all(16), child:
             Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('${sale['code']}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
@@ -2019,6 +2037,8 @@ class MorePage extends StatelessWidget {
     ]),
     const SizedBox(height: 12),
     MenuGroup('Dữ liệu', [
+      MenuAction(Icons.print, 'Cài đặt máy in K80', () => Navigator.push(context,
+          MaterialPageRoute(builder: (_) => const PrinterSettingsPage()))),
       MenuAction(Icons.backup, 'Sao lưu & khôi phục', () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BackupPage())); onChanged(); }),
       MenuAction(Icons.password, 'Đổi mã PIN', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ChangePinPage()))),
     ]),
@@ -2805,9 +2825,17 @@ class _RepairDetailPageState extends State<RepairDetailPage> {
   @override
   Widget build(BuildContext context) {
     final r = widget.repair;
+    final receipt = ReceiptDocument.repair(r, status);
     return Scaffold(
       appBar: AppBar(title: Text('${r['code']}')),
       body: ListView(padding: const EdgeInsets.all(16), children: [
+        FilledButton.icon(
+          onPressed: () => Navigator.push(context, MaterialPageRoute(
+              builder: (_) => ReceiptPreviewPage(receipt: receipt))),
+          icon: const Icon(Icons.print),
+          label: const Text('In / chia sẻ phiếu sửa chữa'),
+        ),
+        const SizedBox(height: 12),
         Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
           crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('${r['device']}', style: const TextStyle(fontSize: 23, fontWeight: FontWeight.bold)),
@@ -2944,11 +2972,19 @@ class _WarrantyDetailPageState extends State<WarrantyDetailPage> {
     final sold = parseDate(w['created_at']);
     final end = sold == null || months <= 0 ? null : addMonths(sold, months);
     final active = months > 0 && end != null && !DateTime.now().isAfter(end);
+    final receipt = ReceiptDocument.warranty(w);
     return Scaffold(
       appBar: AppBar(title: const Text('Quản lý bảo hành')),
       floatingActionButton: active ? FloatingActionButton.extended(
           onPressed: addClaim, icon: const Icon(Icons.add), label: const Text('Tiếp nhận bảo hành')) : null,
       body: ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 90), children: [
+        FilledButton.icon(
+          onPressed: () => Navigator.push(context, MaterialPageRoute(
+              builder: (_) => ReceiptPreviewPage(receipt: receipt))),
+          icon: const Icon(Icons.print),
+          label: const Text('In / chia sẻ phiếu bảo hành'),
+        ),
+        const SizedBox(height: 12),
         if (!active) Card(color: Colors.orange.shade50, child: Padding(
           padding: const EdgeInsets.all(14),
           child: Row(children: [
@@ -3215,6 +3251,648 @@ class _BackupPageState extends State<BackupPage> {
     } catch (e) {
       if (mounted) { showError(context, e); setState(() => busy = false); }
     }
+  }
+}
+
+class ReceiptItem {
+  const ReceiptItem({
+    required this.name,
+    required this.quantity,
+    required this.unitPrice,
+    this.detail = '',
+  });
+
+  final String name;
+  final String detail;
+  final int quantity;
+  final int unitPrice;
+}
+
+class ReceiptDocument {
+  const ReceiptDocument({
+    required this.title,
+    required this.code,
+    required this.date,
+    required this.details,
+    this.items = const [],
+    this.totals = const [],
+    this.note = '',
+  });
+
+  final String title;
+  final String code;
+  final String date;
+  final List<MapEntry<String, String>> details;
+  final List<ReceiptItem> items;
+  final List<MapEntry<String, String>> totals;
+  final String note;
+
+  String get fileName => 'Phieu_$code.pdf';
+
+  factory ReceiptDocument.invoice(
+      Map<String, Object?> sale, List<Map<String, Object?>> rows) {
+    final months = sale['warranty_months'] as int;
+    final soldAt = parseDate(sale['created_at']);
+    return ReceiptDocument(
+      title: 'HÓA ĐƠN BÁN HÀNG',
+      code: '${sale['code']}',
+      date: formatDateTime(sale['created_at']),
+      details: [
+        MapEntry('Khách hàng', '${sale['customer']}'),
+        MapEntry('Điện thoại', textOrDash(sale['phone'])),
+        MapEntry('Trạng thái',
+            sale['status'] == 'cancelled' ? 'ĐÃ HỦY' : 'Hoàn thành'),
+      ],
+      items: rows.map((item) => ReceiptItem(
+        name: '${item['product_name']}',
+        detail: [
+          if (item['imei'] != null && '${item['imei']}'.trim().isNotEmpty)
+            'IMEI: ${item['imei']}',
+          if (item['color'] != null && '${item['color']}'.trim().isNotEmpty)
+            'Màu: ${item['color']}',
+        ].join(' • '),
+        quantity: (item['quantity'] as num).toInt(),
+        unitPrice: (item['unit_price'] as num).toInt(),
+      )).toList(),
+      totals: [
+        MapEntry('TỔNG TIỀN', vnd(sale['total'] as int)),
+        MapEntry('Tiền mặt', vnd(sale['paid_cash'] as int)),
+        MapEntry('Chuyển khoản', vnd(sale['paid_transfer'] as int)),
+        MapEntry('Còn nợ', vnd(sale['debt'] as int)),
+      ],
+      note: months <= 0
+          ? 'Sản phẩm không có bảo hành.'
+          : 'Bảo hành ${warrantyLabel(months)}${soldAt == null ? '' : ', đến ${DateFormat('dd/MM/yyyy').format(addMonths(soldAt, months))}'}.'
+              ' Vui lòng giữ phiếu và IMEI còn nguyên vẹn.',
+    );
+  }
+
+  factory ReceiptDocument.repair(Map<String, Object?> repair, String status) {
+    final amount = (repair['amount'] as num).toInt();
+    final paid = (repair['paid'] as num).toInt();
+    return ReceiptDocument(
+      title: 'PHIẾU SỬA CHỮA',
+      code: '${repair['code']}',
+      date: formatDateTime(repair['received_at']),
+      details: [
+        MapEntry('Khách hàng', textOrDash(repair['customer'])),
+        MapEntry('Điện thoại', textOrDash(repair['phone'])),
+        MapEntry('Thiết bị', '${repair['device']}'),
+        MapEntry('IMEI', textOrDash(repair['imei'])),
+        MapEntry('Tình trạng', '${repair['issue']}'),
+        MapEntry('Trạng thái', repairStatus(status)),
+      ],
+      totals: [
+        MapEntry('Tiền sửa dự kiến', vnd(amount)),
+        MapEntry('Đã thanh toán', vnd(paid)),
+        MapEntry('Còn lại', vnd(amount - paid)),
+      ],
+      note: '${repair['note']}'.trim().isEmpty
+          ? 'Khách hàng vui lòng kiểm tra kỹ thiết bị khi nhận lại máy.'
+          : 'Ghi chú: ${repair['note']}\nKhách hàng vui lòng kiểm tra kỹ thiết bị khi nhận lại máy.',
+    );
+  }
+
+  factory ReceiptDocument.warranty(Map<String, Object?> warranty) {
+    final months = (warranty['warranty_months'] as num).toInt();
+    final soldAt = parseDate(warranty['created_at']);
+    final expires =
+        soldAt == null || months <= 0 ? null : addMonths(soldAt, months);
+    return ReceiptDocument(
+      title: 'PHIẾU BẢO HÀNH',
+      code: '${warranty['code']}',
+      date: formatDateTime(warranty['created_at']),
+      details: [
+        MapEntry('Khách hàng', textOrDash(warranty['customer'])),
+        MapEntry('Điện thoại', textOrDash(warranty['phone'])),
+        MapEntry('Sản phẩm', '${warranty['product_name']}'),
+        MapEntry('IMEI', textOrDash(warranty['imei'])),
+        MapEntry('Thời hạn', warrantyLabel(months)),
+        MapEntry('Hết hạn', expires == null
+            ? 'Không có'
+            : DateFormat('dd/MM/yyyy').format(expires)),
+      ],
+      note: 'Điều kiện bảo hành: máy còn nguyên tem và IMEI, không rơi vỡ, '
+          'không vào nước, không tự ý tháo sửa. Vui lòng mang theo phiếu khi bảo hành.',
+    );
+  }
+
+  factory ReceiptDocument.test() => ReceiptDocument(
+    title: 'PHIẾU IN THỬ K80',
+    code: 'TEST-${DateFormat('HHmmss').format(DateTime.now())}',
+    date: formatDateTime(DateTime.now().toIso8601String()),
+    details: const [
+      MapEntry('Kết nối', 'Thành công'),
+      MapEntry('Khổ giấy', 'K80 / 80 mm'),
+    ],
+    note: 'Nếu chữ và đường kẻ rõ ràng, máy in đã sẵn sàng sử dụng.',
+  );
+}
+
+String textOrDash(Object? value) {
+  final text = value == null ? '' : '$value'.trim();
+  return text.isEmpty ? 'Không ghi' : text;
+}
+
+class ReceiptPaper extends StatelessWidget {
+  const ReceiptPaper({super.key, required this.receipt, this.width = 360});
+  final ReceiptDocument receipt;
+  final double width;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: width,
+    color: Colors.white,
+    padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
+    child: DefaultTextStyle(
+      style: const TextStyle(color: Colors.black, fontSize: 13, height: 1.25),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Text('MINH CẢNH MOBILE', textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 3),
+        const Text('196 Trung Hưng, Vũ Thư, Hưng Yên',
+            textAlign: TextAlign.center),
+        const Text('Điện thoại: 0889 486 662', textAlign: TextAlign.center),
+        const SizedBox(height: 10),
+        _receiptRule(),
+        const SizedBox(height: 9),
+        Text(receipt.title, textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+        Text('Mã phiếu: ${receipt.code}', textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w700)),
+        Text(receipt.date, textAlign: TextAlign.center),
+        const SizedBox(height: 9),
+        _receiptRule(),
+        const SizedBox(height: 7),
+        ...receipt.details.map((line) => _ReceiptRow(line.key, line.value)),
+        if (receipt.items.isNotEmpty) ...[
+          const SizedBox(height: 7),
+          _receiptRule(),
+          const SizedBox(height: 7),
+          const Align(alignment: Alignment.centerLeft,
+              child: Text('HÀNG HÓA',
+                  style: TextStyle(fontWeight: FontWeight.w900))),
+          const SizedBox(height: 5),
+          ...receipt.items.map((item) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+              Text(item.name,
+                  style: const TextStyle(fontWeight: FontWeight.w800)),
+              if (item.detail.isNotEmpty)
+                Text(item.detail, style: const TextStyle(fontSize: 12)),
+              Row(children: [
+                Expanded(child: Text('${item.quantity} x ${vnd(item.unitPrice)}')),
+                Text(vnd(item.quantity * item.unitPrice),
+                    style: const TextStyle(fontWeight: FontWeight.w800)),
+              ]),
+            ]),
+          )),
+        ],
+        if (receipt.totals.isNotEmpty) ...[
+          _receiptRule(),
+          const SizedBox(height: 6),
+          ...receipt.totals.map((line) => _ReceiptRow(line.key, line.value,
+              bold: line == receipt.totals.first)),
+        ],
+        if (receipt.note.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          _receiptRule(),
+          const SizedBox(height: 7),
+          Text(receipt.note, textAlign: TextAlign.left,
+              style: const TextStyle(fontSize: 12)),
+        ],
+        const SizedBox(height: 18),
+        const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(child: Text('Khách hàng\n(Ký, ghi rõ họ tên)',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
+          Expanded(child: Text('Nhân viên\n(Ký, ghi rõ họ tên)',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
+        ]),
+        const SizedBox(height: 42),
+        const Text('Cảm ơn quý khách!', textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w900)),
+      ]),
+    ),
+  );
+}
+
+Widget _receiptRule() => Container(height: 1, color: Colors.black);
+
+class _ReceiptRow extends StatelessWidget {
+  const _ReceiptRow(this.label, this.value, {this.bold = false});
+  final String label;
+  final String value;
+  final bool bold;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 2),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SizedBox(width: 118, child: Text(label,
+          style: TextStyle(
+              fontWeight: bold ? FontWeight.w900 : FontWeight.w500))),
+      Expanded(child: Text(value, textAlign: TextAlign.right,
+          style: TextStyle(
+              fontWeight: bold ? FontWeight.w900 : FontWeight.w700))),
+    ]),
+  );
+}
+
+class ReceiptPrinter {
+  static Future<Uint8List> render(
+      BuildContext context, ReceiptDocument receipt) async {
+    final controller = ScreenshotController();
+    return controller.captureFromWidget(
+      InheritedTheme.captureAll(
+        context,
+        Material(
+          color: Colors.white,
+          child: MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.noScaling),
+            child: ReceiptPaper(receipt: receipt),
+          ),
+        ),
+      ),
+      delay: const Duration(milliseconds: 80),
+      pixelRatio: 2,
+    );
+  }
+
+  static Future<List<int>> thermalBytes(Uint8List png) async {
+    final decoded = img.decodeImage(png);
+    if (decoded == null) throw Exception('Không thể tạo ảnh phiếu in');
+    final printable = img.copyResize(decoded, width: 576,
+        interpolation: img.Interpolation.average);
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(PaperSize.mm80, profile);
+    return <int>[
+      ...generator.reset(),
+      ...generator.imageRaster(printable, align: PosAlign.center),
+      ...generator.feed(3),
+    ];
+  }
+
+  static Future<void> print(
+      BuildContext context, ReceiptDocument receipt) async {
+    final transport =
+        await StoreDb.instance.getSetting('printer_transport') ?? 'lan';
+    final savedCopies = int.tryParse(
+        await StoreDb.instance.getSetting('printer_copies') ?? '1');
+    final copies = (savedCopies ?? 1).clamp(1, 3);
+    final png = await render(context, receipt);
+    final bytes = await thermalBytes(png);
+
+    if (transport == 'bluetooth') {
+      final mac =
+          await StoreDb.instance.getSetting('printer_bluetooth_mac') ?? '';
+      if (mac.isEmpty) {
+        throw Exception(
+            'Chưa chọn máy in Bluetooth trong Cài đặt máy in K80');
+      }
+      if (!await PrintBluetoothThermal.bluetoothEnabled) {
+        throw Exception('Bluetooth đang tắt. Hãy bật Bluetooth rồi thử lại');
+      }
+      var connected = await PrintBluetoothThermal.connectionStatus;
+      if (!connected) {
+        connected =
+            await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+      }
+      if (!connected) throw Exception('Không kết nối được máy in Bluetooth');
+      for (var i = 0; i < copies; i++) {
+        final ok = await PrintBluetoothThermal.writeBytes(bytes);
+        if (!ok) throw Exception('Máy in Bluetooth không nhận dữ liệu');
+      }
+      return;
+    }
+
+    final host = await StoreDb.instance.getSetting('printer_lan_ip') ?? '';
+    final port = int.tryParse(
+        await StoreDb.instance.getSetting('printer_lan_port') ?? '9100') ?? 9100;
+    if (host.trim().isEmpty) {
+      throw Exception(
+          'Chưa nhập địa chỉ IP máy in LAN trong Cài đặt máy in K80');
+    }
+    final socket = await Socket.connect(host.trim(), port,
+        timeout: const Duration(seconds: 7));
+    try {
+      for (var i = 0; i < copies; i++) {
+        socket.add(bytes);
+        await socket.flush();
+      }
+    } finally {
+      await socket.close();
+    }
+  }
+
+  static Future<void> share(
+      BuildContext context, ReceiptDocument receipt) async {
+    final png = await render(context, receipt);
+    final decoded = img.decodeImage(png);
+    if (decoded == null) throw Exception('Không thể tạo tệp chia sẻ');
+    final pageWidth = 80 * PdfPageFormat.mm;
+    final printableWidth = pageWidth - 8 * PdfPageFormat.mm;
+    final pageHeight = printableWidth * decoded.height / decoded.width +
+        8 * PdfPageFormat.mm;
+    final document = pw.Document();
+    document.addPage(pw.Page(
+      pageFormat: PdfPageFormat(pageWidth, pageHeight,
+          marginAll: 4 * PdfPageFormat.mm),
+      build: (_) => pw.Center(
+          child: pw.Image(pw.MemoryImage(png), fit: pw.BoxFit.contain)),
+    ));
+    final pdfBytes = await document.save();
+    await SharePlus.instance.share(ShareParams(
+      files: [XFile.fromData(pdfBytes, mimeType: 'application/pdf')],
+      fileNameOverrides: [receipt.fileName],
+      subject: '${receipt.title} ${receipt.code}',
+      text: '${receipt.title} ${receipt.code} - Minh Cảnh Mobile',
+    ));
+  }
+}
+
+class ReceiptPreviewPage extends StatefulWidget {
+  const ReceiptPreviewPage({super.key, required this.receipt});
+  final ReceiptDocument receipt;
+  @override
+  State<ReceiptPreviewPage> createState() => _ReceiptPreviewPageState();
+}
+
+class _ReceiptPreviewPageState extends State<ReceiptPreviewPage> {
+  bool busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final available = MediaQuery.sizeOf(context).width - 32;
+    final width = available < 360 ? available : 360.0;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Xem trước phiếu K80')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Center(
+            child: ReceiptPaper(receipt: widget.receipt, width: width)),
+      ),
+      bottomNavigationBar: SafeArea(child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        child: Row(children: [
+          Expanded(child: OutlinedButton.icon(
+            onPressed: busy ? null : share,
+            icon: const Icon(Icons.share),
+            label: const Text('Chia sẻ PDF'),
+          )),
+          const SizedBox(width: 10),
+          Expanded(child: FilledButton.icon(
+            onPressed: busy ? null : printReceipt,
+            icon: busy
+                ? const SizedBox(width: 18, height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.print),
+            label: Text(busy ? 'Đang xử lý' : 'In phiếu'),
+          )),
+        ]),
+      )),
+    );
+  }
+
+  Future<void> printReceipt() async {
+    setState(() => busy = true);
+    try {
+      await ReceiptPrinter.print(context, widget.receipt);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Đã gửi phiếu tới máy in')));
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  Future<void> share() async {
+    setState(() => busy = true);
+    try {
+      await ReceiptPrinter.share(context, widget.receipt);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+    if (mounted) setState(() => busy = false);
+  }
+}
+
+class PrinterSettingsPage extends StatefulWidget {
+  const PrinterSettingsPage({super.key});
+  @override
+  State<PrinterSettingsPage> createState() => _PrinterSettingsPageState();
+}
+
+class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
+  String transport = 'lan';
+  String bluetoothMac = '';
+  String bluetoothName = '';
+  int copies = 1;
+  final ip = TextEditingController();
+  final port = TextEditingController(text: '9100');
+  List<BluetoothInfo> devices = [];
+  bool loading = true;
+  bool searching = false;
+  bool testing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  @override
+  void dispose() {
+    ip.dispose();
+    port.dispose();
+    super.dispose();
+  }
+
+  Future<void> load() async {
+    transport =
+        await StoreDb.instance.getSetting('printer_transport') ?? 'lan';
+    ip.text = await StoreDb.instance.getSetting('printer_lan_ip') ?? '';
+    port.text =
+        await StoreDb.instance.getSetting('printer_lan_port') ?? '9100';
+    bluetoothMac =
+        await StoreDb.instance.getSetting('printer_bluetooth_mac') ?? '';
+    bluetoothName =
+        await StoreDb.instance.getSetting('printer_bluetooth_name') ?? '';
+    copies = int.tryParse(
+        await StoreDb.instance.getSetting('printer_copies') ?? '1') ?? 1;
+    if (mounted) setState(() => loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Cài đặt máy in K80')),
+    body: loading
+        ? const Center(child: CircularProgressIndicator())
+        : ListView(padding: const EdgeInsets.all(16), children: [
+            const Text('Kiểu kết nối',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'lan', icon: Icon(Icons.lan),
+                    label: Text('LAN / Wi-Fi')),
+                ButtonSegment(value: 'bluetooth', icon: Icon(Icons.bluetooth),
+                    label: Text('Bluetooth')),
+              ],
+              selected: {transport},
+              onSelectionChanged: (value) =>
+                  setState(() => transport = value.first),
+            ),
+            const SizedBox(height: 16),
+            if (transport == 'lan') ...[
+              Card(child: Padding(padding: const EdgeInsets.all(16),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    const Text('Máy in KiotViet dùng dây LAN',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    const Text(
+                        'Điện thoại phải dùng Wi-Fi cùng bộ phát mạng với máy in.'),
+                    const SizedBox(height: 14),
+                    TextField(controller: ip,
+                        keyboardType: TextInputType.url,
+                        decoration: const InputDecoration(
+                            labelText: 'Địa chỉ IP máy in',
+                            hintText: 'Ví dụ: 192.168.1.100')),
+                    const SizedBox(height: 12),
+                    TextField(controller: port,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                            labelText: 'Cổng in', hintText: '9100')),
+                  ]))),
+            ] else ...[
+              Card(child: Padding(padding: const EdgeInsets.all(16),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                    const Text('Máy in cầm tay Bluetooth',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    Text(bluetoothName.isEmpty
+                        ? 'Chưa chọn máy in. Hãy ghép đôi máy trong Cài đặt Bluetooth của điện thoại trước.'
+                        : 'Đã chọn: $bluetoothName\n$bluetoothMac'),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: searching ? null : searchBluetooth,
+                      icon: searching
+                          ? const SizedBox(width: 18, height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.search),
+                      label: Text(searching ? 'Đang tìm' : 'Tìm máy đã ghép đôi'),
+                    ),
+                    ...devices.map((device) => RadioListTile<String>(
+                      contentPadding: EdgeInsets.zero,
+                      value: device.macAdress,
+                      groupValue: bluetoothMac,
+                      title: Text(device.name.isEmpty
+                          ? 'Máy in Bluetooth' : device.name),
+                      subtitle: Text(device.macAdress),
+                      onChanged: (value) => setState(() {
+                        bluetoothMac = value ?? '';
+                        bluetoothName = device.name.isEmpty
+                            ? 'Máy in Bluetooth' : device.name;
+                      }),
+                    )),
+                  ]))),
+            ],
+            const SizedBox(height: 14),
+            DropdownButtonFormField<int>(
+              initialValue: copies,
+              decoration: const InputDecoration(
+                  labelText: 'Số liên mỗi lần in'),
+              items: const [1, 2, 3].map((value) => DropdownMenuItem(
+                  value: value, child: Text('$value liên'))).toList(),
+              onChanged: (value) => setState(() => copies = value ?? 1),
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(onPressed: () async {
+                try {
+                  await save();
+                } catch (e) {
+                  if (mounted) showError(context, e);
+                }
+              },
+                icon: const Icon(Icons.save),
+                label: const Text('Lưu cài đặt')),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: testing ? null : testPrint,
+              icon: testing
+                  ? const SizedBox(width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.print),
+              label: Text(testing ? 'Đang in thử' : 'Lưu và in thử'),
+            ),
+          ]),
+  );
+
+  Future<void> searchBluetooth() async {
+    setState(() => searching = true);
+    try {
+      if (!await PrintBluetoothThermal.bluetoothEnabled) {
+        throw Exception('Bluetooth đang tắt. Hãy bật Bluetooth rồi thử lại');
+      }
+      final results = await PrintBluetoothThermal.pairedBluetooths;
+      if (mounted) {
+        setState(() => devices = results);
+        if (results.isEmpty) {
+          throw Exception(
+              'Không thấy máy đã ghép đôi. Hãy ghép đôi máy in trong Cài đặt Bluetooth trước');
+        }
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+    if (mounted) setState(() => searching = false);
+  }
+
+  Future<void> save({bool notify = true}) async {
+    final portValue = int.tryParse(port.text.trim());
+    if (transport == 'lan' &&
+        (ip.text.trim().isEmpty || portValue == null)) {
+      throw Exception('Hãy nhập đúng IP và cổng máy in LAN');
+    }
+    if (transport == 'bluetooth' && bluetoothMac.isEmpty) {
+      throw Exception('Hãy chọn máy in Bluetooth');
+    }
+    await StoreDb.instance.setSetting('printer_transport', transport);
+    await StoreDb.instance.setSetting('printer_lan_ip', ip.text.trim());
+    await StoreDb.instance.setSetting('printer_lan_port', port.text.trim());
+    await StoreDb.instance
+        .setSetting('printer_bluetooth_mac', bluetoothMac);
+    await StoreDb.instance
+        .setSetting('printer_bluetooth_name', bluetoothName);
+    await StoreDb.instance.setSetting('printer_copies', '$copies');
+    if (notify && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Đã lưu cài đặt máy in')));
+    }
+  }
+
+  Future<void> testPrint() async {
+    setState(() => testing = true);
+    try {
+      await save(notify: false);
+      if (mounted) {
+        await ReceiptPrinter.print(context, ReceiptDocument.test());
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Đã gửi phiếu in thử')));
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+    if (mounted) setState(() => testing = false);
   }
 }
 
