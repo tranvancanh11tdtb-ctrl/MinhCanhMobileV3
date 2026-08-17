@@ -73,3 +73,20 @@ jobs:
         with:
           name: MinhCanhMobileV3-APK
           path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Prepare Android APK signer
+        shell: bash
+        run: |
+          build_tools_path="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -x "$build_tools_path/apksigner"
+          test -f "$build_tools_path/lib/apksigner.jar"
+          mkdir -p build/apksigner/lib
+          cp "$build_tools_path/apksigner" build/apksigner/
+          cp "$build_tools_path/lib/apksigner.jar" build/apksigner/lib/
+
+      - name: Save Android APK signer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-APK-Signer
+          path: build/apksigner
+
