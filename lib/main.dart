@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:path/path.dart';
+import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
 void main() async {
@@ -46,7 +46,7 @@ class StoreDb {
   Future<Database> get database async => _db ??= await _open();
 
   Future<Database> _open() async {
-    final file = join(await getDatabasesPath(), 'minh_canh_mobile_v3.db');
+    final file = p.join(await getDatabasesPath(), 'minh_canh_mobile_v3.db');
     return openDatabase(file, version: 1, onConfigure: (db) async {
       await db.execute('PRAGMA foreign_keys = ON');
     }, onCreate: (db, version) async {
@@ -670,7 +670,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
       final products = snap.data ?? [];
       return ListView(padding: const EdgeInsets.all(16), children: [
         DropdownButtonFormField<int>(
-          value: product?['id'] as int?, decoration: const InputDecoration(labelText: 'Chọn mẫu hàng *'),
+          initialValue: product?['id'] as int?, decoration: const InputDecoration(labelText: 'Chọn mẫu hàng *'),
           items: products.map((p) => DropdownMenuItem(value: p['id'] as int, child: Text('${p['name']}'))).toList(),
           onChanged: (id) => setState(() { product = products.firstWhere((p) => p['id'] == id); _syncSerials(); }),
         ),
@@ -683,7 +683,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
         const SizedBox(height: 12),
         TextField(controller: paid, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Đã thanh toán')),
         const SizedBox(height: 12),
-        DropdownButtonFormField<String>(value: payment, decoration: const InputDecoration(labelText: 'Phương thức'), items: ['Tiền mặt','Chuyển khoản','Ghi nợ nhà cung cấp'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(), onChanged: (v) => setState(() => payment = v!)),
+        DropdownButtonFormField<String>(initialValue: payment, decoration: const InputDecoration(labelText: 'Phương thức'), items: ['Tiền mặt','Chuyển khoản','Ghi nợ nhà cung cấp'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(), onChanged: (v) => setState(() => payment = v!)),
         if (product?['track_imei'] == 1) ...[
           const SizedBox(height: 20),
           const Text('Danh sách IMEI', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
@@ -755,8 +755,8 @@ class _SalePageState extends State<SalePage> {
     Expanded(child: FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.products(), builder: (context, snap) {
       final products = (snap.data ?? []).where((p) => (p['stock'] as int) > 0).toList();
       return ListView(padding: const EdgeInsets.all(16), children: [
-        DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn hàng còn tồn'), value: product?['id'] as int?, items: products.map((p) => DropdownMenuItem(value: p['id'] as int, child: Text('${p['name']} • tồn ${p['stock']}'))).toList(), onChanged: (id) => setState(() { product = products.firstWhere((p) => p['id'] == id); serialId = null; price.text = '${product!['sale_price']}'; })),
-        if (product?['track_imei'] == 1) FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.serials(product!['id'] as int, status: 'in_stock'), builder: (context, ss) => Padding(padding: const EdgeInsets.only(top: 12), child: DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn IMEI *'), value: serialId, items: (ss.data ?? []).map((s) => DropdownMenuItem(value: s['id'] as int, child: Text('${s['imei']} • ${s['color']}'))).toList(), onChanged: (v) => setState(() => serialId = v))))
+        DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn hàng còn tồn'), initialValue: product?['id'] as int?, items: products.map((p) => DropdownMenuItem(value: p['id'] as int, child: Text('${p['name']} • tồn ${p['stock']}'))).toList(), onChanged: (id) => setState(() { product = products.firstWhere((p) => p['id'] == id); serialId = null; price.text = '${product!['sale_price']}'; })),
+        if (product?['track_imei'] == 1) FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.serials(product!['id'] as int, status: 'in_stock'), builder: (context, ss) => Padding(padding: const EdgeInsets.only(top: 12), child: DropdownButtonFormField<int>(decoration: const InputDecoration(labelText: 'Chọn IMEI *'), initialValue: serialId, items: (ss.data ?? []).map((s) => DropdownMenuItem(value: s['id'] as int, child: Text('${s['imei']} • ${s['color']}'))).toList(), onChanged: (v) => setState(() => serialId = v))))
         else if (product != null) Padding(padding: const EdgeInsets.only(top: 12), child: TextFormField(initialValue: '1', keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Số lượng'), onChanged: (v) => quantity = int.tryParse(v) ?? 0)),
         const SizedBox(height: 12),
         TextField(controller: price, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Giá bán *')),
@@ -769,7 +769,7 @@ class _SalePageState extends State<SalePage> {
         const SizedBox(height: 12),
         TextField(controller: transfer, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Chuyển khoản')),
         const SizedBox(height: 12),
-        DropdownButtonFormField<int>(value: warranty, decoration: const InputDecoration(labelText: 'Bảo hành'), items: const [DropdownMenuItem(value: 0, child: Text('Không bảo hành')), DropdownMenuItem(value: 3, child: Text('3 tháng')), DropdownMenuItem(value: 6, child: Text('6 tháng')), DropdownMenuItem(value: 9, child: Text('9 tháng')), DropdownMenuItem(value: 12, child: Text('12 tháng')), DropdownMenuItem(value: 24, child: Text('2 năm'))], onChanged: (v) => warranty = v!),
+        DropdownButtonFormField<int>(initialValue: warranty, decoration: const InputDecoration(labelText: 'Bảo hành'), items: const [DropdownMenuItem(value: 0, child: Text('Không bảo hành')), DropdownMenuItem(value: 3, child: Text('3 tháng')), DropdownMenuItem(value: 6, child: Text('6 tháng')), DropdownMenuItem(value: 9, child: Text('9 tháng')), DropdownMenuItem(value: 12, child: Text('12 tháng')), DropdownMenuItem(value: 24, child: Text('2 năm'))], onChanged: (v) => warranty = v!),
         const SizedBox(height: 20),
         FilledButton.icon(onPressed: saving ? null : complete, icon: const Icon(Icons.shopping_cart_checkout), label: const Text('Hoàn tất bán hàng')),
       ]);
