@@ -847,6 +847,34 @@ class StoreDb {
     }, where: 'id=?', whereArgs: [id]);
   }
 
+  Future<void> updateWarrantyClaim({
+    required int id,
+    required String issue,
+    required String note,
+    required String status,
+  }) async {
+    if (issue.trim().isEmpty) {
+      throw Exception('Hãy nhập tình trạng máy');
+    }
+    final db = await database;
+    final updated = await db.update('warranty_claims', {
+      'issue': issue.trim(),
+      'note': note.trim(),
+      'status': status,
+      'resolved_at': status == 'returned'
+          ? DateTime.now().toIso8601String()
+          : null,
+    }, where: 'id=?', whereArgs: [id]);
+    if (updated == 0) throw Exception('Không tìm thấy phiếu bảo hành');
+  }
+
+  Future<void> deleteWarrantyClaim(int id) async {
+    final db = await database;
+    final deleted =
+        await db.delete('warranty_claims', where: 'id=?', whereArgs: [id]);
+    if (deleted == 0) throw Exception('Không tìm thấy phiếu bảo hành');
+  }
+
   Future<List<Map<String, Object?>>> customerDirectory() async {
     final db = await database;
     return db.query('customer_directory', orderBy: 'name COLLATE NOCASE');
@@ -1173,6 +1201,55 @@ class StoreDb {
     }, where: 'id=?', whereArgs: [id]);
   }
 
+  Future<Map<String, Object?>> repair(int id) async {
+    final db = await database;
+    final rows = await db.query('repairs', where: 'id=?', whereArgs: [id]);
+    if (rows.isEmpty) throw Exception('Không tìm thấy phiếu sửa chữa');
+    return rows.first;
+  }
+
+  Future<void> updateRepair({
+    required int id,
+    required String customer,
+    required String phone,
+    required String device,
+    required String imei,
+    required String issue,
+    required int amount,
+    required int partsCost,
+    required int paid,
+    required String note,
+  }) async {
+    if (device.trim().isEmpty || issue.trim().isEmpty) {
+      throw Exception('Hãy nhập tên máy và tình trạng lỗi');
+    }
+    if (amount < 0 || partsCost < 0 || paid < 0 || paid > amount) {
+      throw Exception('Số tiền phiếu sửa chữa không hợp lệ');
+    }
+    final db = await database;
+    await db.transaction((txn) async {
+      await _ensureCustomer(txn, customer, phone);
+      final updated = await txn.update('repairs', {
+        'customer': customer.trim().isEmpty ? 'Khách lẻ' : customer.trim(),
+        'phone': phone.trim(),
+        'device': device.trim(),
+        'imei': imei.trim(),
+        'issue': issue.trim(),
+        'amount': amount,
+        'parts_cost': partsCost,
+        'paid': paid,
+        'note': note.trim(),
+      }, where: 'id=?', whereArgs: [id]);
+      if (updated == 0) throw Exception('Không tìm thấy phiếu sửa chữa');
+    });
+  }
+
+  Future<void> deleteRepair(int id) async {
+    final db = await database;
+    final deleted = await db.delete('repairs', where: 'id=?', whereArgs: [id]);
+    if (deleted == 0) throw Exception('Không tìm thấy phiếu sửa chữa');
+  }
+
   Future<List<Map<String, Object?>>> cashEntries() async {
     final db = await database;
     return db.query('cash_entries', orderBy: 'id DESC');
@@ -1440,6 +1517,69 @@ class StoreDb {
       WHERE s.status='completed' AND s.created_at>=? AND s.created_at<?
       GROUP BY s.id ORDER BY s.created_at DESC''',
       [start.toIso8601String(), end.toIso8601String()]);
+  }
+
+  Future<List<Map<String, Object?>>> salesTrend(String mode) async {
+    final db = await database;
+    final now = DateTime.now();
+    late DateTime first;
+    late int count;
+    DateTime Function(DateTime, int) next;
+    String Function(DateTime) label;
+
+    if (mode == 'year') {
+      first = DateTime(now.year - 4);
+      count = 5;
+      next = (value, amount) => DateTime(value.year + amount);
+      label = (value) => '${value.year}';
+    } else if (mode == 'month') {
+      first = DateTime(now.year, now.month - 11);
+      count = 12;
+      next = (value, amount) =>
+          DateTime(value.year, value.month + amount);
+      label = (value) => DateFormat('MM/yyyy').format(value);
+    } else {
+      first = DateTime(now.year, now.month, now.day)
+          .subtract(const Duration(days: 6));
+      count = 7;
+      next = (value, amount) => value.add(Duration(days: amount));
+      label = (value) => DateFormat('dd/MM').format(value);
+    }
+
+    final rows = <Map<String, Object?>>[];
+    for (var index = 0; index < count; index++) {
+      final start = next(first, index);
+      final end = next(first, index + 1);
+      final startText = start.toIso8601String();
+      final endText = end.toIso8601String();
+      final result = await db.rawQuery('''
+        SELECT
+          COALESCE((SELECT SUM(total) FROM sales
+            WHERE status='completed' AND created_at>=? AND created_at<?),0)
+            AS revenue,
+          COALESCE((SELECT COUNT(*) FROM sales
+            WHERE status='completed' AND created_at>=? AND created_at<?),0)
+            AS invoices,
+          COALESCE((SELECT SUM(si.quantity)
+            FROM sale_items si
+            JOIN sales s ON s.id=si.sale_id
+            WHERE s.status='completed'
+              AND s.created_at>=? AND s.created_at<?),0)
+            AS products
+      ''', [
+        startText, endText,
+        startText, endText,
+        startText, endText,
+      ]);
+      final row = result.first;
+      rows.add({
+        'label': label(start),
+        'revenue': (row['revenue'] as num? ?? 0).toInt(),
+        'invoices': (row['invoices'] as num? ?? 0).toInt(),
+        'products': (row['products'] as num? ?? 0).toInt(),
+      });
+    }
+    return rows;
   }
 
   Future<Map<String, int>> dashboard() async {
@@ -3863,6 +4003,7 @@ class ReportsPage extends StatefulWidget {
 
 class _ReportsPageState extends State<ReportsPage> {
   String period = 'month';
+  String trendPeriod = 'day';
   DateTime anchor = DateTime.now();
   DateTimeRange? customRange;
 
@@ -3945,7 +4086,7 @@ class _ReportsPageState extends State<ReportsPage> {
   Widget build(BuildContext context) {
     final selectedRange = range;
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Báo cáo'),
@@ -3954,6 +4095,7 @@ class _ReportsPageState extends State<ReportsPage> {
               Tab(text: 'Doanh thu'),
               Tab(text: 'Hàng hóa'),
               Tab(text: 'Hóa đơn'),
+              Tab(text: 'Biểu đồ'),
             ],
           ),
         ),
@@ -3968,6 +4110,7 @@ class _ReportsPageState extends State<ReportsPage> {
                     selectedRange.start, selectedRange.end),
                 StoreDb.instance.invoiceReport(
                     selectedRange.start, selectedRange.end),
+                StoreDb.instance.salesTrend(trendPeriod),
               ]),
               builder: (context, snapshot) {
                 if (snapshot.connectionState != ConnectionState.done) {
@@ -3985,10 +4128,13 @@ class _ReportsPageState extends State<ReportsPage> {
                     snapshot.data![1] as List<Map<String, Object?>>;
                 final invoices =
                     snapshot.data![2] as List<Map<String, Object?>>;
+                final trend =
+                    snapshot.data![3] as List<Map<String, Object?>>;
                 return TabBarView(children: [
                   _summaryTab(summary),
                   _productTab(products),
                   _invoiceTab(invoices),
+                  _trendTab(trend),
                 ]);
               },
             ),
@@ -4174,6 +4320,116 @@ class _ReportsPageState extends State<ReportsPage> {
             )),
           );
         }),
+      ],
+    );
+  }
+
+  Widget _trendTab(List<Map<String, Object?>> rows) {
+    final maxRevenue = rows.fold<int>(
+        0,
+        (current, row) =>
+            (row['revenue'] as num? ?? 0).toInt() > current
+                ? (row['revenue'] as num? ?? 0).toInt()
+                : current);
+    final totalRevenue = rows.fold<int>(
+        0, (sum, row) => sum + (row['revenue'] as num? ?? 0).toInt());
+    final totalProducts = rows.fold<int>(
+        0, (sum, row) => sum + (row['products'] as num? ?? 0).toInt());
+    final totalInvoices = rows.fold<int>(
+        0, (sum, row) => sum + (row['invoices'] as num? ?? 0).toInt());
+    final title = trendPeriod == 'year'
+        ? 'So sánh 5 năm gần nhất'
+        : trendPeriod == 'month'
+            ? 'So sánh 12 tháng gần nhất'
+            : 'So sánh 7 ngày gần nhất';
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(
+                value: 'day',
+                label: Text('Ngày'),
+                icon: Icon(Icons.today)),
+            ButtonSegment(
+                value: 'month',
+                label: Text('Tháng'),
+                icon: Icon(Icons.calendar_month)),
+            ButtonSegment(
+                value: 'year',
+                label: Text('Năm'),
+                icon: Icon(Icons.event_note)),
+          ],
+          selected: {trendPeriod},
+          onSelectionChanged: (values) =>
+              setState(() => trendPeriod = values.first),
+        ),
+        const SizedBox(height: 16),
+        Text(title,
+            style:
+                const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 10),
+        Card(
+            child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(children: [
+            infoLine('Tổng doanh thu bán hàng', vnd(totalRevenue)),
+            infoLine('Sản phẩm đã bán', '$totalProducts'),
+            infoLine('Số hóa đơn', '$totalInvoices'),
+          ]),
+        )),
+        const SizedBox(height: 14),
+        ...rows.map((row) {
+          final revenue = (row['revenue'] as num? ?? 0).toInt();
+          final products = (row['products'] as num? ?? 0).toInt();
+          final invoices = (row['invoices'] as num? ?? 0).toInt();
+          final ratio =
+              maxRevenue == 0 ? 0.0 : revenue / maxRevenue;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Card(
+                child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(children: [
+                SizedBox(
+                  width: 68,
+                  child: Text('${row['label']}',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                      Text(vnd(revenue),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue)),
+                      const SizedBox(height: 6),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: LinearProgressIndicator(
+                          value: ratio,
+                          minHeight: 15,
+                          color: Colors.blue,
+                          backgroundColor: Colors.blue.shade50,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text('$products sản phẩm • $invoices hóa đơn',
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.black54)),
+                    ])),
+              ]),
+            )),
+          );
+        }),
+        const Card(
+            child: Padding(
+          padding: EdgeInsets.all(14),
+          child: Text(
+              'Biểu đồ chỉ so sánh hoạt động bán hàng. Phiếu bảo hành không được tính vào doanh thu hoặc lợi nhuận.'),
+        )),
       ],
     );
   }
@@ -5164,38 +5420,80 @@ class _RepairsPageState extends State<RepairsPage> {
 }
 
 class RepairForm extends StatefulWidget {
-  const RepairForm({super.key});
+  const RepairForm({super.key, this.repair});
+  final Map<String, Object?>? repair;
+
   @override
   State<RepairForm> createState() => _RepairFormState();
 }
 
 class _RepairFormState extends State<RepairForm> {
-  final customer = TextEditingController();
-  final phone = TextEditingController();
-  final device = TextEditingController();
-  final imei = TextEditingController();
-  final issue = TextEditingController();
-  final amount = TextEditingController();
-  final partsCost = TextEditingController();
-  final paid = TextEditingController();
-  final note = TextEditingController();
+  late final TextEditingController customer;
+  late final TextEditingController phone;
+  late final TextEditingController device;
+  late final TextEditingController imei;
+  late final TextEditingController issue;
+  late final TextEditingController amount;
+  late final TextEditingController partsCost;
+  late final TextEditingController paid;
+  late final TextEditingController note;
   List<Map<String, Object?>> customers = [];
   int selectedCustomerId = 0;
   bool saving = false;
 
+  bool get editing => widget.repair != null;
+
   @override
   void initState() {
     super.initState();
+    final r = widget.repair;
+    customer = TextEditingController(text: '${r?['customer'] ?? ''}');
+    phone = TextEditingController(text: '${r?['phone'] ?? ''}');
+    device = TextEditingController(text: '${r?['device'] ?? ''}');
+    imei = TextEditingController(text: '${r?['imei'] ?? ''}');
+    issue = TextEditingController(text: '${r?['issue'] ?? ''}');
+    amount = TextEditingController(text: r == null ? '' : '${r['amount']}');
+    partsCost =
+        TextEditingController(text: r == null ? '' : '${r['parts_cost']}');
+    paid = TextEditingController(text: r == null ? '' : '${r['paid']}');
+    note = TextEditingController(text: '${r?['note'] ?? ''}');
     _loadCustomers();
+  }
+
+  @override
+  void dispose() {
+    customer.dispose();
+    phone.dispose();
+    device.dispose();
+    imei.dispose();
+    issue.dispose();
+    amount.dispose();
+    partsCost.dispose();
+    paid.dispose();
+    note.dispose();
+    super.dispose();
   }
 
   Future<void> _loadCustomers({int? selectId}) async {
     final rows = await StoreDb.instance.customerDirectory();
     if (!mounted) return;
+    var resolvedId = selectId ?? selectedCustomerId;
+    if (selectId == null && editing) {
+      for (final row in rows) {
+        final samePhone = phone.text.trim().isNotEmpty &&
+            '${row['phone']}'.trim() == phone.text.trim();
+        final sameName = '${row['name']}'.trim().toLowerCase() ==
+            customer.text.trim().toLowerCase();
+        if (samePhone || sameName) {
+          resolvedId = row['id'] as int;
+          break;
+        }
+      }
+    }
     setState(() {
       customers = rows;
+      selectedCustomerId = resolvedId;
       if (selectId != null) {
-        selectedCustomerId = selectId;
         final selected = rows.where((row) => row['id'] == selectId);
         if (selected.isNotEmpty) {
           customer.text = '${selected.first['name']}';
@@ -5218,71 +5516,128 @@ class _RepairFormState extends State<RepairForm> {
     setState(() {
       selectedCustomerId = id;
       final selected = customers.where((row) => row['id'] == id);
-      customer.text = id == 0 || selected.isEmpty
-          ? '' : '${selected.first['name']}';
-      phone.text = id == 0 || selected.isEmpty
-          ? '' : '${selected.first['phone']}';
+      customer.text =
+          id == 0 || selected.isEmpty ? '' : '${selected.first['name']}';
+      phone.text =
+          id == 0 || selected.isEmpty ? '' : '${selected.first['phone']}';
     });
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Nhận máy sửa chữa')),
-    body: ListView(padding: const EdgeInsets.all(16), children: [
-      DropdownButtonFormField<int>(
-        key: ValueKey('repair-customer-$selectedCustomerId-${customers.length}'),
-        initialValue: selectedCustomerId,
-        isExpanded: true,
-        decoration: const InputDecoration(
-            labelText: 'Khách hàng', prefixIcon: Icon(Icons.person)),
-        items: [
-          const DropdownMenuItem(value: 0, child: Text('Khách lẻ')),
-          ...customers.map((row) => DropdownMenuItem(
-              value: row['id'] as int,
-              child: Text('${row['name']}${'${row['phone']}'.trim().isEmpty ? '' : ' • ${row['phone']}'}'))),
-          const DropdownMenuItem(value: -1,
-              child: Text('+ Thêm khách hàng mới')),
-        ],
-        onChanged: _pickCustomer,
-      ),
-      if (selectedCustomerId > 0) ...[
-        const SizedBox(height: 8),
-        Text('SĐT: ${phone.text.trim().isEmpty ? 'Không ghi' : phone.text}',
-            style: const TextStyle(color: Colors.black54)),
-      ],
-      const SizedBox(height: 12),
-      TextField(controller: device, decoration: const InputDecoration(labelText: 'Tên máy *')),
-      const SizedBox(height: 12),
-      TextField(controller: imei, decoration: const InputDecoration(labelText: 'IMEI')),
-      const SizedBox(height: 12),
-      TextField(controller: issue, maxLines: 2, decoration: const InputDecoration(labelText: 'Tình trạng lỗi *')),
-      const SizedBox(height: 12),
-      TextField(controller: amount, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Giá sửa dự kiến')),
-      const SizedBox(height: 12),
-      TextField(controller: partsCost, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Tiền linh kiện / giá vốn')),
-      const SizedBox(height: 12),
-      TextField(controller: paid, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Khách đã thanh toán')),
-      const SizedBox(height: 12),
-      TextField(controller: note, maxLines: 2, decoration: const InputDecoration(labelText: 'Ghi chú')),
-      const SizedBox(height: 20),
-      FilledButton.icon(onPressed: saving ? null : save,
-          icon: const Icon(Icons.save), label: const Text('Lưu phiếu nhận máy')),
-    ]),
-  );
+        appBar: AppBar(
+            title: Text(editing ? 'Sửa phiếu sửa chữa' : 'Nhận máy sửa chữa')),
+        body: ListView(padding: const EdgeInsets.all(16), children: [
+          DropdownButtonFormField<int>(
+            key: ValueKey(
+                'repair-customer-$selectedCustomerId-${customers.length}'),
+            initialValue: selectedCustomerId,
+            isExpanded: true,
+            decoration: const InputDecoration(
+                labelText: 'Chọn nhanh khách hàng',
+                prefixIcon: Icon(Icons.person_search)),
+            items: [
+              const DropdownMenuItem(value: 0, child: Text('Khách lẻ / nhập tay')),
+              ...customers.map((row) => DropdownMenuItem(
+                  value: row['id'] as int,
+                  child: Text(
+                      '${row['name']}${'${row['phone']}'.trim().isEmpty ? '' : ' • ${row['phone']}'}'))),
+              const DropdownMenuItem(
+                  value: -1, child: Text('+ Thêm khách hàng mới')),
+            ],
+            onChanged: _pickCustomer,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+              controller: customer,
+              decoration: const InputDecoration(labelText: 'Tên khách hàng')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: phone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: 'Số điện thoại')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: device,
+              decoration: const InputDecoration(labelText: 'Tên máy *')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: imei,
+              decoration: const InputDecoration(labelText: 'IMEI')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: issue,
+              maxLines: 2,
+              decoration:
+                  const InputDecoration(labelText: 'Tình trạng lỗi *')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: amount,
+              keyboardType: TextInputType.number,
+              decoration:
+                  const InputDecoration(labelText: 'Giá sửa dự kiến')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: partsCost,
+              keyboardType: TextInputType.number,
+              decoration:
+                  const InputDecoration(labelText: 'Tiền linh kiện / giá vốn')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: paid,
+              keyboardType: TextInputType.number,
+              decoration:
+                  const InputDecoration(labelText: 'Khách đã thanh toán')),
+          const SizedBox(height: 12),
+          TextField(
+              controller: note,
+              maxLines: 2,
+              decoration: const InputDecoration(labelText: 'Ghi chú')),
+          const SizedBox(height: 20),
+          FilledButton.icon(
+              onPressed: saving ? null : save,
+              icon: const Icon(Icons.save),
+              label: Text(editing
+                  ? 'Lưu thay đổi'
+                  : 'Lưu phiếu nhận máy')),
+        ]),
+      );
 
   Future<void> save() async {
     setState(() => saving = true);
     try {
-      await StoreDb.instance.addRepair(
-        customer: customer.text, phone: phone.text, device: device.text,
-        imei: imei.text, issue: issue.text,
-        amount: int.tryParse(amount.text) ?? 0,
-        partsCost: int.tryParse(partsCost.text) ?? 0,
-        paid: int.tryParse(paid.text) ?? 0, note: note.text,
-      );
+      if (editing) {
+        await StoreDb.instance.updateRepair(
+          id: widget.repair!['id'] as int,
+          customer: customer.text,
+          phone: phone.text,
+          device: device.text,
+          imei: imei.text,
+          issue: issue.text,
+          amount: int.tryParse(amount.text) ?? 0,
+          partsCost: int.tryParse(partsCost.text) ?? 0,
+          paid: int.tryParse(paid.text) ?? 0,
+          note: note.text,
+        );
+      } else {
+        await StoreDb.instance.addRepair(
+          customer: customer.text,
+          phone: phone.text,
+          device: device.text,
+          imei: imei.text,
+          issue: issue.text,
+          amount: int.tryParse(amount.text) ?? 0,
+          partsCost: int.tryParse(partsCost.text) ?? 0,
+          paid: int.tryParse(paid.text) ?? 0,
+          note: note.text,
+        );
+      }
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
-      if (mounted) { showError(context, e); setState(() => saving = false); }
+      if (mounted) {
+        showError(context, e);
+        setState(() => saving = false);
+      }
     }
   }
 }
@@ -5290,67 +5645,174 @@ class _RepairFormState extends State<RepairForm> {
 class RepairDetailPage extends StatefulWidget {
   const RepairDetailPage({super.key, required this.repair});
   final Map<String, Object?> repair;
+
   @override
   State<RepairDetailPage> createState() => _RepairDetailPageState();
 }
 
 class _RepairDetailPageState extends State<RepairDetailPage> {
+  late Map<String, Object?> repair = widget.repair;
   late String status = '${widget.repair['status']}';
   bool changed = false;
 
+  Future<void> reload() async {
+    final fresh = await StoreDb.instance.repair(repair['id'] as int);
+    if (!mounted) return;
+    setState(() {
+      repair = fresh;
+      status = '${fresh['status']}';
+      changed = true;
+    });
+  }
+
+  Future<void> edit() async {
+    final saved = await Navigator.push<bool>(context,
+        MaterialPageRoute(builder: (_) => RepairForm(repair: repair)));
+    if (saved == true) await reload();
+  }
+
+  Future<void> remove() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Xóa phiếu sửa chữa?'),
+        content: const Text(
+            'Phiếu sẽ bị xóa hẳn. Báo cáo doanh thu và lợi nhuận sẽ tự tính lại theo các phiếu còn lại.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Hủy')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Xóa hẳn')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await StoreDb.instance.deleteRepair(repair['id'] as int);
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final r = widget.repair;
+    final r = repair;
     final receipt = ReceiptDocument.repair(r, status);
-    return Scaffold(
-      appBar: AppBar(title: Text('${r['code']}')),
-      body: ListView(padding: const EdgeInsets.all(16), children: [
-        FilledButton.icon(
-          onPressed: () => Navigator.push(context, MaterialPageRoute(
-              builder: (_) => ReceiptPreviewPage(receipt: receipt))),
-          icon: const Icon(Icons.print),
-          label: const Text('In / chia sẻ phiếu sửa chữa'),
-        ),
-        const SizedBox(height: 12),
-        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('${r['device']}', style: const TextStyle(fontSize: 23, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            infoLine('Khách hàng', '${r['customer']}'),
-            infoLine('Số điện thoại', '${r['phone']}'.trim().isEmpty ? 'Không ghi' : '${r['phone']}'),
-            infoLine('IMEI', '${r['imei']}'.trim().isEmpty ? 'Không ghi' : '${r['imei']}'),
-            infoLine('Ngày nhận', formatDateTime(r['received_at'])),
-            infoLine('Tình trạng', '${r['issue']}'),
-            infoLine('Ghi chú', '${r['note']}'.trim().isEmpty ? 'Không có' : '${r['note']}'),
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {},
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text('${r['code']}'),
+          actions: [
+            IconButton(
+                tooltip: 'Sửa phiếu',
+                onPressed: edit,
+                icon: const Icon(Icons.edit)),
+            IconButton(
+                tooltip: 'Xóa phiếu',
+                onPressed: remove,
+                icon: const Icon(Icons.delete_outline, color: Colors.red)),
           ],
-        ))),
-        const SizedBox(height: 12),
-        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Chi phí', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            infoLine('Tiền sửa', vnd(r['amount'] as int)),
-            infoLine('Giá vốn', vnd(r['parts_cost'] as int)),
-            infoLine('Lợi nhuận dự kiến', vnd((r['amount'] as int) - (r['parts_cost'] as int))),
-            infoLine('Đã thu', vnd(r['paid'] as int)),
-            infoLine('Khách còn nợ', vnd((r['amount'] as int) - (r['paid'] as int))),
-          ],
-        ))),
-        const SizedBox(height: 12),
-        DropdownButtonFormField<String>(
-          initialValue: status,
-          decoration: const InputDecoration(labelText: 'Trạng thái phiếu'),
-          items: const ['received', 'repairing', 'completed', 'returned', 'cancelled']
-              .map((s) => DropdownMenuItem(value: s, child: Text(repairStatus(s)))).toList(),
-          onChanged: (value) async {
-            if (value == null) return;
-            await StoreDb.instance.updateRepairStatus(r['id'] as int, value);
-            if (mounted) setState(() { status = value; changed = true; });
-          },
         ),
-        const SizedBox(height: 20),
-        FilledButton(onPressed: () => Navigator.pop(context, changed), child: const Text('Xong')),
-      ]),
+        body: ListView(padding: const EdgeInsets.all(16), children: [
+          FilledButton.icon(
+            onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) =>
+                        ReceiptPreviewPage(receipt: receipt))),
+            icon: const Icon(Icons.print),
+            label: const Text('In / chia sẻ phiếu sửa chữa'),
+          ),
+          const SizedBox(height: 12),
+          Card(
+              child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('${r['device']}',
+                      style: const TextStyle(
+                          fontSize: 23, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  infoLine('Khách hàng', '${r['customer']}'),
+                  infoLine(
+                      'Số điện thoại',
+                      '${r['phone']}'.trim().isEmpty
+                          ? 'Không ghi'
+                          : '${r['phone']}'),
+                  infoLine(
+                      'IMEI',
+                      '${r['imei']}'.trim().isEmpty
+                          ? 'Không ghi'
+                          : '${r['imei']}'),
+                  infoLine('Ngày nhận', formatDateTime(r['received_at'])),
+                  infoLine('Tình trạng', '${r['issue']}'),
+                  infoLine(
+                      'Ghi chú',
+                      '${r['note']}'.trim().isEmpty
+                          ? 'Không có'
+                          : '${r['note']}'),
+                ]),
+          )),
+          const SizedBox(height: 12),
+          Card(
+              child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Chi phí',
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  infoLine('Tiền sửa', vnd(r['amount'] as int)),
+                  infoLine('Giá vốn', vnd(r['parts_cost'] as int)),
+                  infoLine(
+                      'Lợi nhuận dự kiến',
+                      vnd((r['amount'] as int) -
+                          (r['parts_cost'] as int))),
+                  infoLine('Đã thu', vnd(r['paid'] as int)),
+                  infoLine(
+                      'Khách còn nợ',
+                      vnd((r['amount'] as int) -
+                          (r['paid'] as int))),
+                ]),
+          )),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            key: ValueKey('repair-status-$status'),
+            initialValue: status,
+            decoration:
+                const InputDecoration(labelText: 'Trạng thái phiếu'),
+            items: const [
+              'received',
+              'repairing',
+              'completed',
+              'returned',
+              'cancelled'
+            ]
+                .map((value) => DropdownMenuItem(
+                    value: value, child: Text(repairStatus(value))))
+                .toList(),
+            onChanged: (value) async {
+              if (value == null) return;
+              await StoreDb.instance
+                  .updateRepairStatus(r['id'] as int, value);
+              await reload();
+            },
+          ),
+          const SizedBox(height: 20),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, changed),
+              child: const Text('Xong')),
+        ]),
+      ),
     );
   }
 }
@@ -5436,6 +5898,7 @@ class _WarrantiesPageState extends State<WarrantiesPage> {
 class WarrantyDetailPage extends StatefulWidget {
   const WarrantyDetailPage({super.key, required this.warranty});
   final Map<String, Object?> warranty;
+
   @override
   State<WarrantyDetailPage> createState() => _WarrantyDetailPageState();
 }
@@ -5447,106 +5910,292 @@ class _WarrantyDetailPageState extends State<WarrantyDetailPage> {
     final months = w['warranty_months'] as int;
     final sold = parseDate(w['created_at']);
     final end = sold == null || months <= 0 ? null : addMonths(sold, months);
-    final active = months > 0 && end != null && !DateTime.now().isAfter(end);
+    final active =
+        months > 0 && end != null && !DateTime.now().isAfter(end);
     final receipt = ReceiptDocument.warranty(w);
     return Scaffold(
       appBar: AppBar(title: const Text('Quản lý bảo hành')),
-      floatingActionButton: active ? FloatingActionButton.extended(
-          onPressed: addClaim, icon: const Icon(Icons.add), label: const Text('Tiếp nhận bảo hành')) : null,
-      body: ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 90), children: [
-        FilledButton.icon(
-          onPressed: () => Navigator.push(context, MaterialPageRoute(
-              builder: (_) => ReceiptPreviewPage(receipt: receipt))),
-          icon: const Icon(Icons.print),
-          label: const Text('In / chia sẻ phiếu bảo hành'),
-        ),
-        const SizedBox(height: 12),
-        if (!active) Card(color: Colors.orange.shade50, child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(children: [
-            const Icon(Icons.info_outline, color: Colors.orange),
-            const SizedBox(width: 10),
-            Expanded(child: Text(months <= 0
-                ? 'Hóa đơn này không có thời hạn bảo hành.'
-                : 'Sản phẩm đã hết thời hạn bảo hành.')),
-          ]),
-        )),
-        if (!active) const SizedBox(height: 12),
-        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('${w['product_name']}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            infoLine('Khách hàng', '${w['customer']}'),
-            infoLine('Số điện thoại', '${w['phone']}'.trim().isEmpty ? 'Không ghi' : '${w['phone']}'),
-            infoLine('IMEI', '${w['imei']}'.trim().isEmpty || w['imei'] == null ? 'Không ghi' : '${w['imei']}'),
-            infoLine('Hóa đơn', '${w['code']}'),
-            infoLine('Ngày bán', formatDateTime(w['created_at'])),
-            infoLine('Thời hạn', warrantyLabel(months)),
-            infoLine('Hết hạn', months <= 0 ? 'Không có' : end == null ? 'Không rõ' : DateFormat('dd/MM/yyyy').format(end)),
-            const SizedBox(height: 10),
-            OutlinedButton.icon(
-              onPressed: () => Navigator.push(context, MaterialPageRoute(
-                  builder: (_) => InvoiceDetailPage(saleId: w['sale_id'] as int))),
-              icon: const Icon(Icons.receipt_long),
-              label: const Text('Xem hóa đơn gốc'),
+      floatingActionButton: active
+          ? FloatingActionButton.extended(
+              onPressed: addClaim,
+              icon: const Icon(Icons.add),
+              label: const Text('Tiếp nhận bảo hành'))
+          : null,
+      body: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
+          children: [
+            FilledButton.icon(
+              onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) =>
+                          ReceiptPreviewPage(receipt: receipt))),
+              icon: const Icon(Icons.print),
+              label: const Text('In / chia sẻ phiếu bảo hành'),
             ),
-          ],
-        ))),
-        const SizedBox(height: 16),
-        const Text('Lịch sử tiếp nhận', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        FutureBuilder<List<Map<String, Object?>>>(
-          future: StoreDb.instance.warrantyClaims(w['sale_item_id'] as int),
-          builder: (context, snap) {
-            if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-            final rows = snap.data!;
-            if (rows.isEmpty) return const Card(child: Padding(padding: EdgeInsets.all(20), child: Text('Chưa có lần tiếp nhận bảo hành nào.')));
-            return Column(children: rows.map((r) => Card(child: Padding(
-              padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('${r['issue']}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                Text('Ngày nhận: ${formatDateTime(r['received_at'])}'),
-                if ('${r['note']}'.trim().isNotEmpty) Text('Ghi chú: ${r['note']}'),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  initialValue: '${r['status']}',
-                  decoration: const InputDecoration(labelText: 'Trạng thái'),
-                  items: const ['received', 'processing', 'waiting_parts', 'completed', 'returned']
-                      .map((s) => DropdownMenuItem(value: s, child: Text(warrantyStatus(s)))).toList(),
-                  onChanged: (value) async {
-                    if (value == null) return;
-                    await StoreDb.instance.updateWarrantyClaimStatus(r['id'] as int, value);
-                    if (mounted) setState(() {});
-                  },
-                ),
-              ]),
-            ))).toList());
-          },
-        ),
-      ]),
+            const SizedBox(height: 12),
+            if (!active)
+              Card(
+                  color: Colors.orange.shade50,
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Row(children: [
+                      const Icon(Icons.info_outline, color: Colors.orange),
+                      const SizedBox(width: 10),
+                      Expanded(
+                          child: Text(months <= 0
+                              ? 'Hóa đơn này không có thời hạn bảo hành.'
+                              : 'Sản phẩm đã hết thời hạn bảo hành.')),
+                    ]),
+                  )),
+            if (!active) const SizedBox(height: 12),
+            Card(
+                child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${w['product_name']}',
+                        style: const TextStyle(
+                            fontSize: 22, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    infoLine('Khách hàng', '${w['customer']}'),
+                    infoLine(
+                        'Số điện thoại',
+                        '${w['phone']}'.trim().isEmpty
+                            ? 'Không ghi'
+                            : '${w['phone']}'),
+                    infoLine(
+                        'IMEI',
+                        '${w['imei']}'.trim().isEmpty || w['imei'] == null
+                            ? 'Không ghi'
+                            : '${w['imei']}'),
+                    infoLine('Hóa đơn', '${w['code']}'),
+                    infoLine('Ngày bán', formatDateTime(w['created_at'])),
+                    infoLine('Thời hạn', warrantyLabel(months)),
+                    infoLine(
+                        'Hết hạn',
+                        months <= 0
+                            ? 'Không có'
+                            : end == null
+                                ? 'Không rõ'
+                                : DateFormat('dd/MM/yyyy').format(end)),
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => InvoiceDetailPage(
+                                  saleId: w['sale_id'] as int))),
+                      icon: const Icon(Icons.receipt_long),
+                      label: const Text('Xem hóa đơn gốc'),
+                    ),
+                  ]),
+            )),
+            const SizedBox(height: 16),
+            const Text('Lịch sử tiếp nhận',
+                style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            FutureBuilder<List<Map<String, Object?>>>(
+              future: StoreDb.instance
+                  .warrantyClaims(w['sale_item_id'] as int),
+              builder: (context, snap) {
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final rows = snap.data!;
+                if (rows.isEmpty) {
+                  return const Card(
+                      child: Padding(
+                          padding: EdgeInsets.all(20),
+                          child:
+                              Text('Chưa có lần tiếp nhận bảo hành nào.')));
+                }
+                return Column(
+                    children: rows
+                        .map((r) => Card(
+                                child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(children: [
+                                      Expanded(
+                                          child: Text('${r['issue']}',
+                                              style: const TextStyle(
+                                                  fontWeight:
+                                                      FontWeight.bold))),
+                                      IconButton(
+                                          tooltip: 'Sửa phiếu bảo hành',
+                                          onPressed: () => editClaim(r),
+                                          icon: const Icon(Icons.edit_outlined)),
+                                      IconButton(
+                                          tooltip: 'Xóa phiếu bảo hành',
+                                          onPressed: () => deleteClaim(r),
+                                          icon: const Icon(Icons.delete_outline,
+                                              color: Colors.red)),
+                                    ]),
+                                    Text(
+                                        'Ngày nhận: ${formatDateTime(r['received_at'])}'),
+                                    if ('${r['note']}'.trim().isNotEmpty)
+                                      Text('Ghi chú: ${r['note']}'),
+                                    const SizedBox(height: 8),
+                                    DropdownButtonFormField<String>(
+                                      key: ValueKey(
+                                          'warranty-status-${r['id']}-${r['status']}'),
+                                      initialValue: '${r['status']}',
+                                      decoration: const InputDecoration(
+                                          labelText: 'Trạng thái'),
+                                      items: const [
+                                        'received',
+                                        'processing',
+                                        'waiting_parts',
+                                        'completed',
+                                        'returned'
+                                      ]
+                                          .map((value) => DropdownMenuItem(
+                                              value: value,
+                                              child: Text(
+                                                  warrantyStatus(value))))
+                                          .toList(),
+                                      onChanged: (value) async {
+                                        if (value == null) return;
+                                        await StoreDb.instance
+                                            .updateWarrantyClaimStatus(
+                                                r['id'] as int, value);
+                                        if (mounted) setState(() {});
+                                      },
+                                    ),
+                                  ]),
+                            )))
+                        .toList());
+              },
+            ),
+          ]),
     );
   }
 
   Future<void> addClaim() async {
     final issue = TextEditingController();
     final note = TextEditingController();
-    final ok = await showDialog<bool>(context: context, builder: (dialogContext) => AlertDialog(
-      title: const Text('Tiếp nhận bảo hành'),
-      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextField(controller: issue, maxLines: 2, decoration: const InputDecoration(labelText: 'Tình trạng máy *')),
-        const SizedBox(height: 12),
-        TextField(controller: note, maxLines: 2, decoration: const InputDecoration(labelText: 'Ghi chú')),
-      ])),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Hủy')),
-        FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Tiếp nhận')),
-      ],
-    ));
-    if (ok != true) return;
+    final result = await showDialog<Map<String, String>>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+              title: const Text('Tiếp nhận bảo hành'),
+              content: SingleChildScrollView(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                TextField(
+                    controller: issue,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                        labelText: 'Tình trạng máy *')),
+                const SizedBox(height: 12),
+                TextField(
+                    controller: note,
+                    maxLines: 2,
+                    decoration:
+                        const InputDecoration(labelText: 'Ghi chú')),
+              ])),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: const Text('Hủy')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(dialogContext, {
+                          'issue': issue.text,
+                          'note': note.text,
+                        }),
+                    child: const Text('Tiếp nhận')),
+              ],
+            ));
+    issue.dispose();
+    note.dispose();
+    if (result == null) return;
     try {
       await StoreDb.instance.addWarrantyClaim(
-          saleItemId: widget.warranty['sale_item_id'] as int, issue: issue.text, note: note.text);
+          saleItemId: widget.warranty['sale_item_id'] as int,
+          issue: result['issue'] ?? '',
+          note: result['note'] ?? '');
       if (mounted) setState(() {});
-    } catch (e) { if (mounted) showError(context, e); }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> editClaim(Map<String, Object?> claim) async {
+    final issue = TextEditingController(text: '${claim['issue']}');
+    final note = TextEditingController(text: '${claim['note']}');
+    final result = await showDialog<Map<String, String>>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+              title: const Text('Sửa phiếu bảo hành'),
+              content: SingleChildScrollView(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                TextField(
+                    controller: issue,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                        labelText: 'Tình trạng máy *')),
+                const SizedBox(height: 12),
+                TextField(
+                    controller: note,
+                    maxLines: 2,
+                    decoration:
+                        const InputDecoration(labelText: 'Ghi chú')),
+              ])),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: const Text('Hủy')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(dialogContext, {
+                          'issue': issue.text,
+                          'note': note.text,
+                        }),
+                    child: const Text('Lưu thay đổi')),
+              ],
+            ));
+    issue.dispose();
+    note.dispose();
+    if (result == null) return;
+    try {
+      await StoreDb.instance.updateWarrantyClaim(
+        id: claim['id'] as int,
+        issue: result['issue'] ?? '',
+        note: result['note'] ?? '',
+        status: '${claim['status']}',
+      );
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> deleteClaim(Map<String, Object?> claim) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Xóa phiếu bảo hành?'),
+        content: const Text(
+            'Lần tiếp nhận này sẽ bị xóa hẳn. Thao tác không ảnh hưởng doanh thu và lợi nhuận.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Hủy')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Xóa hẳn')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await StoreDb.instance.deleteWarrantyClaim(claim['id'] as int);
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
   }
 }
 
