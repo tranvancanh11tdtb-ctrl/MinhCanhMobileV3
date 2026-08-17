@@ -2464,22 +2464,58 @@ class _PurchaseFormState extends State<PurchaseForm> {
     quantity = serials.length;
   });
 
+  Future<void> _pickProduct(
+      List<Map<String, Object?>> products) async {
+    if (products.isEmpty) {
+      showError(context, 'Chưa có hàng hóa đang kinh doanh');
+      return;
+    }
+    final selected = await showModalBottomSheet<Map<String, Object?>>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => ProductSearchSheet(
+        products: products,
+        selectedId: product?['id'] as int?,
+      ),
+    );
+    if (selected == null || !mounted) return;
+    setState(() {
+      product = selected;
+      quantity = 1;
+      serials.clear();
+      _syncSerials();
+    });
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Phiếu nhập hàng')),
     body: FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.products(), builder: (context, snap) {
       final products = snap.data ?? [];
       return ListView(padding: const EdgeInsets.all(16), children: [
-        DropdownButtonFormField<int>(
-          initialValue: product?['id'] as int?, decoration: const InputDecoration(labelText: 'Chọn mẫu hàng *'),
-          items: products.map((p) => DropdownMenuItem(value: p['id'] as int, child: Text('${p['name']}'))).toList(),
-          onChanged: (id) => setState(() {
-            product = products.firstWhere((p) => p['id'] == id);
-            quantity = 1;
-            serials.clear();
-            _syncSerials();
-          }),
-        ),
+        Card(child: ListTile(
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+          leading: const CircleAvatar(child: Icon(Icons.search)),
+          title: Text(
+            product == null ? 'Chọn sản phẩm *' : '${product!['name']}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          subtitle: Text(
+            product == null
+                ? 'Bấm để tìm theo tên, mã hàng, hãng hoặc dung lượng'
+                : [
+                    '${product!['code']}',
+                    if ('${product!['brand']}'.trim().isNotEmpty)
+                      '${product!['brand']}',
+                    if ('${product!['capacity']}'.trim().isNotEmpty)
+                      '${product!['capacity']}',
+                  ].join(' • '),
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => _pickProduct(products),
+        )),
         const SizedBox(height: 12),
         if (product?['track_imei'] == 1)
           Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -2576,6 +2612,131 @@ class _PurchaseFormState extends State<PurchaseForm> {
           serials: serials);
       if (mounted) Navigator.pop(context, true);
     } catch (e) { showError(context, e); setState(() => saving = false); }
+  }
+}
+
+class ProductSearchSheet extends StatefulWidget {
+  const ProductSearchSheet({
+    super.key,
+    required this.products,
+    this.selectedId,
+  });
+
+  final List<Map<String, Object?>> products;
+  final int? selectedId;
+
+  @override
+  State<ProductSearchSheet> createState() => _ProductSearchSheetState();
+}
+
+class _ProductSearchSheetState extends State<ProductSearchSheet> {
+  final search = TextEditingController();
+  String query = '';
+
+  @override
+  void dispose() {
+    search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final normalized = query.trim().toLowerCase();
+    final rows = widget.products.where((product) {
+      final text = [
+        product['name'],
+        product['code'],
+        product['brand'],
+        product['capacity'],
+        product['category'],
+      ].map((value) => '${value ?? ''}').join(' ').toLowerCase();
+      return normalized.isEmpty || text.contains(normalized);
+    }).toList();
+
+    return FractionallySizedBox(
+      heightFactor: 0.86,
+      child: Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+          child: Row(children: [
+            const Expanded(child: Text(
+              'Tìm sản phẩm',
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
+            )),
+            IconButton(
+              tooltip: 'Đóng',
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.close),
+            ),
+          ]),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          child: TextField(
+            controller: search,
+            autofocus: true,
+            textInputAction: TextInputAction.search,
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.search),
+              hintText: 'Nhập tên, mã hàng, hãng hoặc dung lượng',
+              suffixIcon: query.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: 'Xóa từ khóa',
+                      onPressed: () {
+                        search.clear();
+                        setState(() => query = '');
+                      },
+                      icon: const Icon(Icons.clear),
+                    ),
+            ),
+            onChanged: (value) => setState(() => query = value),
+          ),
+        ),
+        Expanded(
+          child: rows.isEmpty
+              ? const EmptyState(
+                  Icons.search_off,
+                  'Không tìm thấy sản phẩm',
+                  'Hãy thử tên hoặc mã hàng khác.',
+                )
+              : ListView.separated(
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                  itemCount: rows.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 7),
+                  itemBuilder: (context, index) {
+                    final product = rows[index];
+                    final selected = product['id'] == widget.selectedId;
+                    final details = [
+                      '${product['code']}',
+                      if ('${product['brand']}'.trim().isNotEmpty)
+                        '${product['brand']}',
+                      if ('${product['capacity']}'.trim().isNotEmpty)
+                        '${product['capacity']}',
+                    ].join(' • ');
+                    return Card(child: ListTile(
+                      leading: CircleAvatar(
+                        child: Icon(product['track_imei'] == 1
+                            ? Icons.phone_android
+                            : Icons.inventory_2_outlined),
+                      ),
+                      title: Text(
+                        '${product['name']}',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: Text(details),
+                      trailing: selected
+                          ? const Icon(Icons.check_circle, color: Colors.green)
+                          : const Icon(Icons.chevron_right),
+                      onTap: () => Navigator.pop(context, product),
+                    ));
+                  },
+                ),
+        ),
+      ]),
+    );
   }
 }
 
