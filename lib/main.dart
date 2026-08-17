@@ -202,9 +202,50 @@ class StoreDb {
       FROM products p WHERE p.active=1 ORDER BY p.id DESC''');
   }
 
+  Future<Map<String, Object?>> product(int id) async {
+    final db = await database;
+    final rows = await db.rawQuery('''SELECT p.*,
+      CASE WHEN p.track_imei=1 THEN
+        (SELECT COUNT(*) FROM serial_units s
+         WHERE s.product_id=p.id AND s.status='in_stock')
+      ELSE p.quantity END AS stock,
+      (SELECT GROUP_CONCAT(s.imei, ' ') FROM serial_units s
+       WHERE s.product_id=p.id) AS imeis
+      FROM products p WHERE p.id=?''', [id]);
+    if (rows.isEmpty) throw Exception('Không tìm thấy hàng hóa');
+    return rows.single;
+  }
+
   Future<int> addProduct(Map<String, Object?> row) async {
     final db = await database;
     return db.insert('products', row);
+  }
+
+  Future<void> updateProduct({
+    required int id,
+    required String code,
+    required String name,
+    required String brand,
+    required String capacity,
+    required int salePrice,
+    int? averageCost,
+  }) async {
+    if (code.trim().isEmpty || name.trim().isEmpty) {
+      throw Exception('Mã hàng và tên hàng không được để trống');
+    }
+    if (salePrice < 0 || (averageCost != null && averageCost < 0)) {
+      throw Exception('Giá bán và giá nhập không được là số âm');
+    }
+    final db = await database;
+    final values = <String, Object?>{
+      'code': code.trim(),
+      'name': name.trim(),
+      'brand': brand.trim(),
+      'capacity': capacity.trim(),
+      'sale_price': salePrice,
+    };
+    if (averageCost != null) values['avg_cost'] = averageCost;
+    await db.update('products', values, where: 'id=?', whereArgs: [id]);
   }
 
   Future<void> deleteProduct(int id) async {
@@ -226,6 +267,25 @@ class StoreDb {
         where: status == null ? 'product_id=?' : 'product_id=? AND status=?',
         whereArgs: status == null ? [productId] : [productId, status],
         orderBy: 'id DESC');
+  }
+
+  Future<void> updateSerialUnit({
+    required int id,
+    required String imei,
+    required String color,
+    required String conditionText,
+    required int cost,
+  }) async {
+    if (imei.trim().isEmpty) throw Exception('IMEI không được để trống');
+    if (cost < 0) throw Exception('Giá nhập không được là số âm');
+    final db = await database;
+    await db.update('serial_units', {
+      'imei': imei.trim(),
+      'color': color.trim(),
+      'condition_text':
+          conditionText.trim().isEmpty ? 'Mới' : conditionText.trim(),
+      'cost': cost,
+    }, where: 'id=?', whereArgs: [id]);
   }
 
   Future<int> completePurchase({
@@ -1286,17 +1346,35 @@ class ProductDetail extends StatefulWidget {
 }
 
 class _ProductDetailState extends State<ProductDetail> {
+  late Map<String, Object?> product;
+
+  @override
+  void initState() {
+    super.initState();
+    product = widget.product;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final p = widget.product;
+    final p = product;
     final tracks = p['track_imei'] == 1;
     return Scaffold(
-      appBar: AppBar(title: Text('${p['name']}'), actions: [IconButton(icon: const Icon(Icons.delete_outline), onPressed: delete)]),
+      appBar: AppBar(title: Text('${p['name']}'), actions: [
+        IconButton(
+            tooltip: 'Sửa thông tin',
+            icon: const Icon(Icons.edit_outlined),
+            onPressed: edit),
+        IconButton(
+            tooltip: 'Xóa hàng hóa',
+            icon: const Icon(Icons.delete_outline),
+            onPressed: delete),
+      ]),
       floatingActionButton: FloatingActionButton.extended(onPressed: purchase, icon: const Icon(Icons.add_shopping_cart), label: const Text('Nhập thêm hàng')),
       body: ListView(padding: const EdgeInsets.all(16), children: [
         Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('${p['name']}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
           Text('Mã: ${p['code']}'), Text('Giá bán: ${vnd(p['sale_price'] as int)}'),
+          if (!tracks) Text('Giá nhập bình quân: ${vnd(p['avg_cost'] as int)}'),
           Text(tracks ? 'Quản lý theo Serial/IMEI' : 'Quản lý theo số lượng'),
         ]))),
         const SizedBox(height: 14),
@@ -1306,21 +1384,247 @@ class _ProductDetailState extends State<ProductDetail> {
           final rows = snap.data ?? [];
           if (!snap.hasData) return const Center(child: CircularProgressIndicator());
           if (rows.isEmpty) return const Card(child: Padding(padding: EdgeInsets.all(24), child: Text('Chưa nhập IMEI')));
-          return Column(children: rows.map((s) => Card(child: ListTile(title: Text('${s['imei']}'), subtitle: Text('${s['color']} • ${s['condition_text']} • Giá vốn ${vnd(s['cost'] as int)}'), trailing: Text(statusName('${s['status']}'))))).toList());
+          return Column(children: rows.map((s) => Card(child: ListTile(
+            title: Text('${s['imei']}'),
+            subtitle: Text('${s['color']} • ${s['condition_text']} • Giá nhập ${vnd(s['cost'] as int)}\n${statusName('${s['status']}')}'),
+            isThreeLine: true,
+            trailing: const Icon(Icons.edit_outlined),
+            onTap: () => editSerial(s),
+          ))).toList());
         }) else Card(child: ListTile(title: const Text('Số lượng hiện tại'), trailing: Text('${p['stock']}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)))),
         const SizedBox(height: 80),
       ]),
     );
   }
 
+  Future<void> reload() async {
+    final fresh = await StoreDb.instance.product(product['id'] as int);
+    if (mounted) setState(() => product = fresh);
+  }
+
+  Future<void> edit() async {
+    final changed = await Navigator.push<bool>(context,
+        MaterialPageRoute(builder: (_) => ProductEditForm(product: product)));
+    if (changed == true) {
+      await reload();
+      widget.onChanged();
+    }
+  }
+
+  Future<void> editSerial(Map<String, Object?> serial) async {
+    final changed = await Navigator.push<bool>(context,
+        MaterialPageRoute(builder: (_) => SerialEditForm(serial: serial)));
+    if (changed == true) {
+      setState(() {});
+      widget.onChanged();
+    }
+  }
+
   Future<void> purchase() async {
-    final ok = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => PurchaseForm(initialProduct: widget.product)));
-    if (ok == true) { setState(() {}); widget.onChanged(); }
+    final ok = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => PurchaseForm(initialProduct: product)));
+    if (ok == true) {
+      await reload();
+      widget.onChanged();
+    }
   }
   Future<void> delete() async {
     if (!await confirm(context, 'Xóa hàng hóa', 'Bạn có chắc chắn muốn xóa hàng hóa này không?')) return;
-    try { await StoreDb.instance.deleteProduct(widget.product['id'] as int); widget.onChanged(); if (mounted) Navigator.pop(context); }
+    try { await StoreDb.instance.deleteProduct(product['id'] as int); widget.onChanged(); if (mounted) Navigator.pop(context); }
     catch (e) { showError(context, e); }
+  }
+}
+
+class ProductEditForm extends StatefulWidget {
+  const ProductEditForm({super.key, required this.product});
+  final Map<String, Object?> product;
+  @override
+  State<ProductEditForm> createState() => _ProductEditFormState();
+}
+
+class _ProductEditFormState extends State<ProductEditForm> {
+  final form = GlobalKey<FormState>();
+  late final TextEditingController code;
+  late final TextEditingController name;
+  late final TextEditingController brand;
+  late final TextEditingController capacity;
+  late final TextEditingController salePrice;
+  late final TextEditingController averageCost;
+  bool saving = false;
+
+  bool get tracksImei => widget.product['track_imei'] == 1;
+
+  @override
+  void initState() {
+    super.initState();
+    code = TextEditingController(text: '${widget.product['code']}');
+    name = TextEditingController(text: '${widget.product['name']}');
+    brand = TextEditingController(text: '${widget.product['brand']}');
+    capacity = TextEditingController(text: '${widget.product['capacity']}');
+    salePrice = TextEditingController(text: '${widget.product['sale_price']}');
+    averageCost = TextEditingController(text: '${widget.product['avg_cost']}');
+  }
+
+  @override
+  void dispose() {
+    code.dispose();
+    name.dispose();
+    brand.dispose();
+    capacity.dispose();
+    salePrice.dispose();
+    averageCost.dispose();
+    super.dispose();
+  }
+
+  String? requiredText(String? value) =>
+      value == null || value.trim().isEmpty ? 'Không được để trống' : null;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Sửa thông tin hàng hóa')),
+    body: Form(
+      key: form,
+      child: ListView(padding: const EdgeInsets.all(16), children: [
+        TextFormField(controller: code,
+            decoration: const InputDecoration(labelText: 'Mã hàng *'),
+            validator: requiredText),
+        const SizedBox(height: 12),
+        TextFormField(controller: name,
+            decoration: const InputDecoration(labelText: 'Tên hàng *'),
+            validator: requiredText),
+        const SizedBox(height: 12),
+        TextFormField(controller: brand,
+            decoration: const InputDecoration(labelText: 'Thương hiệu')),
+        const SizedBox(height: 12),
+        TextFormField(controller: capacity,
+            decoration: const InputDecoration(labelText: 'Dung lượng')),
+        const SizedBox(height: 12),
+        TextFormField(controller: salePrice,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(labelText: 'Giá bán *')),
+        const SizedBox(height: 12),
+        if (!tracksImei)
+          TextFormField(controller: averageCost,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(
+                  labelText: 'Giá nhập bình quân hiện tại *')),
+        if (tracksImei)
+          const Card(child: Padding(
+            padding: EdgeInsets.all(14),
+            child: Text(
+                'Giá nhập của điện thoại được lưu riêng theo từng IMEI. '
+                'Quay lại danh sách IMEI và bấm vào chiếc máy cần sửa giá.'),
+          )),
+        const SizedBox(height: 20),
+        FilledButton.icon(
+            onPressed: saving ? null : save,
+            icon: const Icon(Icons.save),
+            label: const Text('Lưu thay đổi')),
+      ]),
+    ),
+  );
+
+  Future<void> save() async {
+    if (!form.currentState!.validate()) return;
+    setState(() => saving = true);
+    try {
+      await StoreDb.instance.updateProduct(
+        id: widget.product['id'] as int,
+        code: code.text,
+        name: name.text,
+        brand: brand.text,
+        capacity: capacity.text,
+        salePrice: int.tryParse(salePrice.text) ?? 0,
+        averageCost: tracksImei
+            ? null : (int.tryParse(averageCost.text) ?? 0),
+      );
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) {
+        showError(context, e);
+        setState(() => saving = false);
+      }
+    }
+  }
+}
+
+class SerialEditForm extends StatefulWidget {
+  const SerialEditForm({super.key, required this.serial});
+  final Map<String, Object?> serial;
+  @override
+  State<SerialEditForm> createState() => _SerialEditFormState();
+}
+
+class _SerialEditFormState extends State<SerialEditForm> {
+  late final TextEditingController imei;
+  late final TextEditingController color;
+  late final TextEditingController conditionText;
+  late final TextEditingController cost;
+  bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    imei = TextEditingController(text: '${widget.serial['imei']}');
+    color = TextEditingController(text: '${widget.serial['color']}');
+    conditionText =
+        TextEditingController(text: '${widget.serial['condition_text']}');
+    cost = TextEditingController(text: '${widget.serial['cost']}');
+  }
+
+  @override
+  void dispose() {
+    imei.dispose();
+    color.dispose();
+    conditionText.dispose();
+    cost.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Sửa IMEI và giá nhập')),
+    body: ListView(padding: const EdgeInsets.all(16), children: [
+      TextField(controller: imei,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(labelText: 'IMEI *')),
+      const SizedBox(height: 12),
+      TextField(controller: color,
+          decoration: const InputDecoration(labelText: 'Màu sắc')),
+      const SizedBox(height: 12),
+      TextField(controller: conditionText,
+          decoration: const InputDecoration(labelText: 'Tình trạng')),
+      const SizedBox(height: 12),
+      TextField(controller: cost,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(labelText: 'Giá nhập *')),
+      const SizedBox(height: 20),
+      FilledButton.icon(
+          onPressed: saving ? null : save,
+          icon: const Icon(Icons.save),
+          label: const Text('Lưu thay đổi')),
+    ]),
+  );
+
+  Future<void> save() async {
+    setState(() => saving = true);
+    try {
+      await StoreDb.instance.updateSerialUnit(
+        id: widget.serial['id'] as int,
+        imei: imei.text,
+        color: color.text,
+        conditionText: conditionText.text,
+        cost: int.tryParse(cost.text) ?? 0,
+      );
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) {
+        showError(context, e);
+        setState(() => saving = false);
+      }
+    }
   }
 }
 
