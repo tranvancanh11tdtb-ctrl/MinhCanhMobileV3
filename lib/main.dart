@@ -60,7 +60,7 @@ class StoreDb {
 
   Future<Database> _open() async {
     final file = p.join(await getDatabasesPath(), 'minh_canh_mobile_v3.db');
-    return openDatabase(file, version: 2, onConfigure: (db) async {
+    return openDatabase(file, version: 3, onConfigure: (db) async {
       await db.execute('PRAGMA foreign_keys = ON');
     }, onCreate: (db, version) async {
       await db.execute('''CREATE TABLE products(
@@ -145,8 +145,10 @@ class StoreDb {
         created_at TEXT NOT NULL
       )''');
       await _createV2Tables(db);
+      await _createV3Tables(db);
     }, onUpgrade: (db, oldVersion, newVersion) async {
       if (oldVersion < 2) await _createV2Tables(db);
+      if (oldVersion < 3) await _createV3Tables(db);
     });
   }
 
@@ -199,6 +201,52 @@ class StoreDb {
       created_at TEXT NOT NULL,
       FOREIGN KEY(product_id) REFERENCES products(id)
     )''');
+  }
+
+  Future<void> _createV3Tables(DatabaseExecutor db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS customer_directory(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      phone TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )''');
+    await db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS
+      idx_customer_directory_identity
+      ON customer_directory(name COLLATE NOCASE, phone)''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS supplier_directory(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      phone TEXT NOT NULL DEFAULT '',
+      address TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )''');
+    await db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS
+      idx_supplier_directory_name
+      ON supplier_directory(name COLLATE NOCASE)''');
+    await _backfillDirectories(db);
+  }
+
+  Future<void> _backfillDirectories(DatabaseExecutor db) async {
+    await db.rawInsert('''INSERT OR IGNORE INTO customer_directory
+      (name, phone, note, created_at, updated_at)
+      SELECT TRIM(customer), TRIM(phone), '', MIN(activity_at), MAX(activity_at)
+      FROM (
+        SELECT customer, phone, created_at activity_at FROM sales
+        UNION ALL
+        SELECT customer, phone, received_at activity_at FROM repairs
+      ) activity
+      WHERE TRIM(customer)<>'' AND LOWER(TRIM(customer))<>'khách lẻ'
+      GROUP BY LOWER(TRIM(customer)), TRIM(phone)''');
+    await db.rawInsert('''INSERT OR IGNORE INTO supplier_directory
+      (name, phone, address, note, created_at, updated_at)
+      SELECT TRIM(supplier), '', '', '', MIN(created_at), MAX(created_at)
+      FROM purchases
+      WHERE TRIM(supplier)<>''
+      GROUP BY LOWER(TRIM(supplier))''');
   }
 
   Future<List<Map<String, Object?>>> products() async {
@@ -298,6 +346,46 @@ class StoreDb {
     }, where: 'id=?', whereArgs: [id]);
   }
 
+  Future<int?> _ensureCustomer(DatabaseExecutor db,
+      String rawName, String rawPhone) async {
+    final name = rawName.trim().isEmpty ? 'Khách lẻ' : rawName.trim();
+    final phone = rawPhone.trim();
+    if (name.toLowerCase() == 'khách lẻ') return null;
+    final rows = await db.query('customer_directory',
+        where: phone.isNotEmpty
+            ? "phone=? OR (LOWER(name)=LOWER(?) AND phone=?)"
+            : "LOWER(name)=LOWER(?) AND phone=''",
+        whereArgs: phone.isNotEmpty ? [phone, name, phone] : [name],
+        limit: 1);
+    if (rows.isNotEmpty) return rows.single['id'] as int;
+    final now = DateTime.now().toIso8601String();
+    return db.insert('customer_directory', {
+      'name': name,
+      'phone': phone,
+      'note': '',
+      'created_at': now,
+      'updated_at': now,
+    });
+  }
+
+  Future<int?> _ensureSupplier(
+      DatabaseExecutor db, String rawName) async {
+    final name = rawName.trim();
+    if (name.isEmpty) return null;
+    final rows = await db.query('supplier_directory',
+        where: 'LOWER(name)=LOWER(?)', whereArgs: [name], limit: 1);
+    if (rows.isNotEmpty) return rows.single['id'] as int;
+    final now = DateTime.now().toIso8601String();
+    return db.insert('supplier_directory', {
+      'name': name,
+      'phone': '',
+      'address': '',
+      'note': '',
+      'created_at': now,
+      'updated_at': now,
+    });
+  }
+
   Future<int> completePurchase({
     required int productId,
     required int quantity,
@@ -317,6 +405,7 @@ class StoreDb {
       }
       final now = DateTime.now().toIso8601String();
       final code = 'PN${DateTime.now().millisecondsSinceEpoch}';
+      await _ensureSupplier(txn, supplier);
       final purchaseTotal = tracks
           ? serials.fold<int>(0, (sum, serial) => sum + serial.cost)
           : quantity * unitCost;
@@ -412,6 +501,7 @@ class StoreDb {
         throw Exception('Số tiền thanh toán không hợp lệ');
       }
       final now = DateTime.now().toIso8601String();
+      await _ensureCustomer(txn, customer, phone);
       final saleId = await txn.insert('sales', {
         'code': 'HD${DateTime.now().millisecondsSinceEpoch}',
         'customer': customer.trim().isEmpty ? 'Khách lẻ' : customer.trim(),
@@ -570,32 +660,233 @@ class StoreDb {
     }, where: 'id=?', whereArgs: [id]);
   }
 
+  Future<List<Map<String, Object?>>> customerDirectory() async {
+    final db = await database;
+    return db.query('customer_directory', orderBy: 'name COLLATE NOCASE');
+  }
+
+  Future<List<Map<String, Object?>>> supplierDirectory() async {
+    final db = await database;
+    return db.query('supplier_directory', orderBy: 'name COLLATE NOCASE');
+  }
+
+  Future<Map<String, Object?>> addCustomerDirectory({
+    required String name,
+    required String phone,
+    required String note,
+  }) async {
+    if (name.trim().isEmpty) throw Exception('Hãy nhập tên khách hàng');
+    final db = await database;
+    final cleanName = name.trim();
+    final cleanPhone = phone.trim();
+    final existing = await db.query('customer_directory',
+        where: cleanPhone.isNotEmpty
+            ? "phone=? OR (LOWER(name)=LOWER(?) AND phone=?)"
+            : "LOWER(name)=LOWER(?) AND phone=''",
+        whereArgs: cleanPhone.isNotEmpty
+            ? [cleanPhone, cleanName, cleanPhone] : [cleanName],
+        limit: 1);
+    if (existing.isNotEmpty) return existing.single;
+    final now = DateTime.now().toIso8601String();
+    final id = await db.insert('customer_directory', {
+      'name': cleanName,
+      'phone': cleanPhone,
+      'note': note.trim(),
+      'created_at': now,
+      'updated_at': now,
+    });
+    return (await db.query('customer_directory',
+        where: 'id=?', whereArgs: [id])).single;
+  }
+
+  Future<Map<String, Object?>> updateCustomerDirectory({
+    required int id,
+    required String name,
+    required String phone,
+    required String note,
+  }) async {
+    if (name.trim().isEmpty) throw Exception('Hãy nhập tên khách hàng');
+    final db = await database;
+    return db.transaction((txn) async {
+      final old = (await txn.query('customer_directory',
+          where: 'id=?', whereArgs: [id])).single;
+      final cleanName = name.trim();
+      final cleanPhone = phone.trim();
+      await txn.update('customer_directory', {
+        'name': cleanName,
+        'phone': cleanPhone,
+        'note': note.trim(),
+        'updated_at': DateTime.now().toIso8601String(),
+      }, where: 'id=?', whereArgs: [id]);
+      for (final table in ['sales', 'repairs']) {
+        await txn.update(table, {'customer': cleanName, 'phone': cleanPhone},
+            where: 'LOWER(TRIM(customer))=LOWER(?) AND TRIM(phone)=?',
+            whereArgs: ['${old['name']}'.trim(), '${old['phone']}'.trim()]);
+      }
+      return (await txn.query('customer_directory',
+          where: 'id=?', whereArgs: [id])).single;
+    });
+  }
+
+  Future<Map<String, Object?>> addSupplierDirectory({
+    required String name,
+    required String phone,
+    required String address,
+    required String note,
+  }) async {
+    if (name.trim().isEmpty) throw Exception('Hãy nhập tên nhà cung cấp');
+    final db = await database;
+    final cleanName = name.trim();
+    final existing = await db.query('supplier_directory',
+        where: 'LOWER(name)=LOWER(?)', whereArgs: [cleanName], limit: 1);
+    if (existing.isNotEmpty) return existing.single;
+    final now = DateTime.now().toIso8601String();
+    final id = await db.insert('supplier_directory', {
+      'name': cleanName,
+      'phone': phone.trim(),
+      'address': address.trim(),
+      'note': note.trim(),
+      'created_at': now,
+      'updated_at': now,
+    });
+    return (await db.query('supplier_directory',
+        where: 'id=?', whereArgs: [id])).single;
+  }
+
+  Future<Map<String, Object?>> updateSupplierDirectory({
+    required int id,
+    required String name,
+    required String phone,
+    required String address,
+    required String note,
+  }) async {
+    if (name.trim().isEmpty) throw Exception('Hãy nhập tên nhà cung cấp');
+    final db = await database;
+    return db.transaction((txn) async {
+      final old = (await txn.query('supplier_directory',
+          where: 'id=?', whereArgs: [id])).single;
+      final cleanName = name.trim();
+      await txn.update('supplier_directory', {
+        'name': cleanName,
+        'phone': phone.trim(),
+        'address': address.trim(),
+        'note': note.trim(),
+        'updated_at': DateTime.now().toIso8601String(),
+      }, where: 'id=?', whereArgs: [id]);
+      await txn.update('purchases', {'supplier': cleanName},
+          where: 'LOWER(TRIM(supplier))=LOWER(?)',
+          whereArgs: ['${old['name']}'.trim()]);
+      return (await txn.query('supplier_directory',
+          where: 'id=?', whereArgs: [id])).single;
+    });
+  }
+
   Future<List<Map<String, Object?>>> customers() async {
     final db = await database;
-    return db.rawQuery('''SELECT customer, phone,
-      SUM(sale_count) invoice_count, COUNT(*) transaction_count,
-      SUM(total_value) total_spent, SUM(debt_value) debt,
-      MAX(activity_at) last_purchase
-      FROM (
-        SELECT customer, phone, 1 sale_count, total total_value,
-          debt debt_value, created_at activity_at
+    return db.rawQuery('''WITH sale_stats AS (
+        SELECT LOWER(TRIM(customer)) name_key, TRIM(phone) phone_key,
+          COUNT(*) invoice_count, COALESCE(SUM(total),0) sale_value,
+          COALESCE(SUM(debt),0) sale_debt, MAX(created_at) last_sale
         FROM sales WHERE status='completed'
-        UNION ALL
-        SELECT customer, phone, 0 sale_count, amount total_value,
-          amount-paid debt_value, received_at activity_at
+        GROUP BY LOWER(TRIM(customer)), TRIM(phone)
+      ), quantity_stats AS (
+        SELECT LOWER(TRIM(s.customer)) name_key, TRIM(s.phone) phone_key,
+          COALESCE(SUM(si.quantity),0) item_quantity
+        FROM sales s JOIN sale_items si ON si.sale_id=s.id
+        WHERE s.status='completed'
+        GROUP BY LOWER(TRIM(s.customer)), TRIM(s.phone)
+      ), repair_stats AS (
+        SELECT LOWER(TRIM(customer)) name_key, TRIM(phone) phone_key,
+          COUNT(*) service_count, COALESCE(SUM(amount),0) service_value,
+          COALESCE(SUM(amount-paid),0) service_debt,
+          MAX(received_at) last_service
         FROM repairs WHERE status!='cancelled'
-      ) activity
-      GROUP BY customer, phone ORDER BY last_purchase DESC''');
+        GROUP BY LOWER(TRIM(customer)), TRIM(phone)
+      )
+      SELECT c.id, c.name customer, c.phone, c.note,
+        COALESCE(ss.invoice_count,0) invoice_count,
+        COALESCE(rs.service_count,0) service_count,
+        COALESCE(ss.invoice_count,0)+COALESCE(rs.service_count,0)
+          transaction_count,
+        COALESCE(qs.item_quantity,0) item_quantity,
+        COALESCE(ss.sale_value,0) sale_value,
+        COALESCE(rs.service_value,0) service_value,
+        COALESCE(ss.sale_value,0)+COALESCE(rs.service_value,0) total_spent,
+        COALESCE(ss.sale_debt,0)+COALESCE(rs.service_debt,0) debt,
+        CASE WHEN COALESCE(ss.last_sale,'')>=COALESCE(rs.last_service,'')
+          THEN ss.last_sale ELSE rs.last_service END last_purchase
+      FROM customer_directory c
+      LEFT JOIN sale_stats ss ON ss.name_key=LOWER(TRIM(c.name))
+        AND ss.phone_key=TRIM(c.phone)
+      LEFT JOIN quantity_stats qs ON qs.name_key=LOWER(TRIM(c.name))
+        AND qs.phone_key=TRIM(c.phone)
+      LEFT JOIN repair_stats rs ON rs.name_key=LOWER(TRIM(c.name))
+        AND rs.phone_key=TRIM(c.phone)
+      ORDER BY CASE WHEN last_purchase IS NULL THEN 1 ELSE 0 END,
+        last_purchase DESC, c.name COLLATE NOCASE''');
+  }
+
+  Future<List<Map<String, Object?>>> customerSales(
+      String name, String phone) async {
+    final db = await database;
+    return db.rawQuery('''SELECT s.*,
+      COALESCE(SUM(si.quantity),0) item_quantity,
+      GROUP_CONCAT(p.name || CASE WHEN su.imei IS NULL OR su.imei=''
+        THEN '' ELSE ' • IMEI ' || su.imei END, ' | ') product_names
+      FROM sales s
+      LEFT JOIN sale_items si ON si.sale_id=s.id
+      LEFT JOIN products p ON p.id=si.product_id
+      LEFT JOIN serial_units su ON su.id=si.serial_id
+      WHERE LOWER(TRIM(s.customer))=LOWER(?) AND TRIM(s.phone)=?
+      GROUP BY s.id ORDER BY s.created_at DESC''', [name.trim(), phone.trim()]);
+  }
+
+  Future<List<Map<String, Object?>>> customerRepairs(
+      String name, String phone) async {
+    final db = await database;
+    return db.query('repairs',
+        where: "LOWER(TRIM(customer))=LOWER(?) AND TRIM(phone)=? AND status!='cancelled'",
+        whereArgs: [name.trim(), phone.trim()], orderBy: 'received_at DESC');
   }
 
   Future<List<Map<String, Object?>>> suppliers() async {
     final db = await database;
-    return db.rawQuery('''SELECT CASE WHEN TRIM(supplier)='' THEN 'Không ghi tên'
-      ELSE supplier END supplier_name, COUNT(*) purchase_count,
-      SUM(total) total_purchase, SUM(total-paid) debt,
-      MAX(created_at) last_purchase
-      FROM purchases WHERE status='completed'
-      GROUP BY supplier ORDER BY last_purchase DESC''');
+    return db.rawQuery('''WITH purchase_stats AS (
+        SELECT LOWER(TRIM(p.supplier)) name_key,
+          COUNT(DISTINCT p.id) purchase_count,
+          COALESCE(SUM(p.total),0) total_purchase,
+          COALESCE(SUM(p.total-p.paid),0) debt,
+          MAX(p.created_at) last_purchase
+        FROM purchases p WHERE p.status='completed'
+        GROUP BY LOWER(TRIM(p.supplier))
+      ), quantity_stats AS (
+        SELECT LOWER(TRIM(p.supplier)) name_key,
+          COALESCE(SUM(pi.quantity),0) total_quantity
+        FROM purchases p JOIN purchase_items pi ON pi.purchase_id=p.id
+        WHERE p.status='completed' GROUP BY LOWER(TRIM(p.supplier))
+      )
+      SELECT d.id, d.name supplier_name, d.phone, d.address, d.note,
+        COALESCE(ps.purchase_count,0) purchase_count,
+        COALESCE(qs.total_quantity,0) total_quantity,
+        COALESCE(ps.total_purchase,0) total_purchase,
+        COALESCE(ps.debt,0) debt, ps.last_purchase
+      FROM supplier_directory d
+      LEFT JOIN purchase_stats ps ON ps.name_key=LOWER(TRIM(d.name))
+      LEFT JOIN quantity_stats qs ON qs.name_key=LOWER(TRIM(d.name))
+      ORDER BY CASE WHEN ps.last_purchase IS NULL THEN 1 ELSE 0 END,
+        ps.last_purchase DESC, d.name COLLATE NOCASE''');
+  }
+
+  Future<List<Map<String, Object?>>> supplierPurchases(String name) async {
+    final db = await database;
+    return db.rawQuery('''SELECT p.*,
+      COALESCE(SUM(pi.quantity),0) total_quantity,
+      GROUP_CONCAT(pr.name || ' x' || pi.quantity, ' | ') product_names
+      FROM purchases p
+      LEFT JOIN purchase_items pi ON pi.purchase_id=p.id
+      LEFT JOIN products pr ON pr.id=pi.product_id
+      WHERE LOWER(TRIM(p.supplier))=LOWER(?)
+      GROUP BY p.id ORDER BY p.created_at DESC''', [name.trim()]);
   }
 
   Future<List<Map<String, Object?>>> repairs() async {
@@ -622,19 +913,22 @@ class StoreDb {
     }
     final db = await database;
     final now = DateTime.now();
-    await db.insert('repairs', {
-      'code': 'SC${now.millisecondsSinceEpoch}',
-      'customer': customer.trim().isEmpty ? 'Khách lẻ' : customer.trim(),
-      'phone': phone.trim(),
-      'device': device.trim(),
-      'imei': imei.trim(),
-      'issue': issue.trim(),
-      'amount': amount,
-      'parts_cost': partsCost,
-      'paid': paid,
-      'status': 'received',
-      'note': note.trim(),
-      'received_at': now.toIso8601String(),
+    await db.transaction((txn) async {
+      await _ensureCustomer(txn, customer, phone);
+      await txn.insert('repairs', {
+        'code': 'SC${now.millisecondsSinceEpoch}',
+        'customer': customer.trim().isEmpty ? 'Khách lẻ' : customer.trim(),
+        'phone': phone.trim(),
+        'device': device.trim(),
+        'imei': imei.trim(),
+        'issue': issue.trim(),
+        'amount': amount,
+        'parts_cost': partsCost,
+        'paid': paid,
+        'status': 'received',
+        'note': note.trim(),
+        'received_at': now.toIso8601String(),
+      });
     });
   }
 
@@ -759,11 +1053,12 @@ class StoreDb {
     const tables = [
       'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
       'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
-      'cash_entries', 'stocktakes', 'app_settings'
+      'cash_entries', 'stocktakes', 'customer_directory',
+      'supplier_directory', 'app_settings'
     ];
     final data = <String, Object?>{
       'app': 'MinhCanhMobileV3',
-      'backup_version': 2,
+      'backup_version': 3,
       'created_at': DateTime.now().toIso8601String(),
     };
     for (final table in tables) {
@@ -780,12 +1075,14 @@ class StoreDb {
     const deleteOrder = [
       'warranty_claims', 'stocktakes', 'cash_entries', 'repairs',
       'inventory_movements', 'sale_items', 'sales', 'purchase_items',
-      'serial_units', 'purchases', 'products', 'app_settings'
+      'serial_units', 'purchases', 'products', 'customer_directory',
+      'supplier_directory', 'app_settings'
     ];
     const insertOrder = [
       'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
       'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
-      'cash_entries', 'stocktakes', 'app_settings'
+      'cash_entries', 'stocktakes', 'customer_directory',
+      'supplier_directory', 'app_settings'
     ];
     final db = await database;
     await db.execute('PRAGMA foreign_keys = OFF');
@@ -804,6 +1101,7 @@ class StoreDb {
             }
           }
         }
+        await _backfillDirectories(txn);
       });
     } finally {
       await db.execute('PRAGMA foreign_keys = ON');
@@ -1653,10 +1951,48 @@ class _PurchaseFormState extends State<PurchaseForm> {
   final paid = TextEditingController();
   String payment = 'Tiền mặt';
   final serials = <SerialDraft>[];
+  List<Map<String, Object?>> suppliers = [];
+  int selectedSupplierId = 0;
   bool saving = false;
 
   @override
-  void initState() { super.initState(); product = widget.initialProduct; _syncSerials(); }
+  void initState() {
+    super.initState();
+    product = widget.initialProduct;
+    _syncSerials();
+    _loadSuppliers();
+  }
+
+  Future<void> _loadSuppliers({int? selectId}) async {
+    final rows = await StoreDb.instance.supplierDirectory();
+    if (!mounted) return;
+    setState(() {
+      suppliers = rows;
+      if (selectId != null) {
+        selectedSupplierId = selectId;
+        final selected = rows.where((row) => row['id'] == selectId);
+        supplier.text = selected.isEmpty ? '' : '${selected.first['name']}';
+      }
+    });
+  }
+
+  Future<void> _pickSupplier(int? id) async {
+    if (id == null) return;
+    if (id == -1) {
+      final created = await Navigator.push<Map<String, Object?>>(context,
+          MaterialPageRoute(builder: (_) => const SupplierFormPage()));
+      if (created != null) {
+        await _loadSuppliers(selectId: created['id'] as int);
+      }
+      return;
+    }
+    setState(() {
+      selectedSupplierId = id;
+      final selected = suppliers.where((row) => row['id'] == id);
+      supplier.text = id == 0 || selected.isEmpty
+          ? '' : '${selected.first['name']}';
+    });
+  }
   void _syncSerials() {
     if (product?['track_imei'] == 1) {
       if (quantity < 1) {
@@ -1719,7 +2055,23 @@ class _PurchaseFormState extends State<PurchaseForm> {
         const SizedBox(height: 12),
         TextField(controller: cost, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Đơn giá nhập chung')),
         const SizedBox(height: 12),
-        TextField(controller: supplier, decoration: const InputDecoration(labelText: 'Nhà cung cấp')),
+        DropdownButtonFormField<int>(
+          key: ValueKey('supplier-$selectedSupplierId-${suppliers.length}'),
+          initialValue: selectedSupplierId,
+          isExpanded: true,
+          decoration: const InputDecoration(
+              labelText: 'Nhà cung cấp', prefixIcon: Icon(Icons.local_shipping)),
+          items: [
+            const DropdownMenuItem(value: 0,
+                child: Text('Không ghi nhà cung cấp')),
+            ...suppliers.map((row) => DropdownMenuItem(
+                value: row['id'] as int,
+                child: Text('${row['name']}${'${row['phone']}'.trim().isEmpty ? '' : ' • ${row['phone']}'}'))),
+            const DropdownMenuItem(value: -1,
+                child: Text('+ Thêm nhà cung cấp mới')),
+          ],
+          onChanged: _pickSupplier,
+        ),
         const SizedBox(height: 12),
         TextField(controller: paid, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Đã thanh toán')),
         const SizedBox(height: 12),
@@ -1805,8 +2157,52 @@ class _SalePageState extends State<SalePage> {
   final cash = TextEditingController();
   final transfer = TextEditingController();
   final customWarranty = TextEditingController();
+  List<Map<String, Object?>> customers = [];
+  int selectedCustomerId = 0;
   int warranty = 0;
   bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCustomers();
+  }
+
+  Future<void> _loadCustomers({int? selectId}) async {
+    final rows = await StoreDb.instance.customerDirectory();
+    if (!mounted) return;
+    setState(() {
+      customers = rows;
+      if (selectId != null) {
+        selectedCustomerId = selectId;
+        final selected = rows.where((row) => row['id'] == selectId);
+        if (selected.isNotEmpty) {
+          customer.text = '${selected.first['name']}';
+          phone.text = '${selected.first['phone']}';
+        }
+      }
+    });
+  }
+
+  Future<void> _pickCustomer(int? id) async {
+    if (id == null) return;
+    if (id == -1) {
+      final created = await Navigator.push<Map<String, Object?>>(context,
+          MaterialPageRoute(builder: (_) => const CustomerFormPage()));
+      if (created != null) {
+        await _loadCustomers(selectId: created['id'] as int);
+      }
+      return;
+    }
+    setState(() {
+      selectedCustomerId = id;
+      final selected = customers.where((row) => row['id'] == id);
+      customer.text = id == 0 || selected.isEmpty
+          ? '' : '${selected.first['name']}';
+      phone.text = id == 0 || selected.isEmpty
+          ? '' : '${selected.first['phone']}';
+    });
+  }
 
   @override
   Widget build(BuildContext context) => Column(children: [
@@ -1820,9 +2216,27 @@ class _SalePageState extends State<SalePage> {
         const SizedBox(height: 12),
         TextField(controller: price, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Giá bán *')),
         const SizedBox(height: 12),
-        TextField(controller: customer, decoration: const InputDecoration(labelText: 'Khách hàng')),
-        const SizedBox(height: 12),
-        TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Số điện thoại')),
+        DropdownButtonFormField<int>(
+          key: ValueKey('customer-$selectedCustomerId-${customers.length}'),
+          initialValue: selectedCustomerId,
+          isExpanded: true,
+          decoration: const InputDecoration(
+              labelText: 'Khách hàng', prefixIcon: Icon(Icons.person)),
+          items: [
+            const DropdownMenuItem(value: 0, child: Text('Khách lẻ')),
+            ...customers.map((row) => DropdownMenuItem(
+                value: row['id'] as int,
+                child: Text('${row['name']}${'${row['phone']}'.trim().isEmpty ? '' : ' • ${row['phone']}'}'))),
+            const DropdownMenuItem(value: -1,
+                child: Text('+ Thêm khách hàng mới')),
+          ],
+          onChanged: _pickCustomer,
+        ),
+        if (selectedCustomerId > 0) ...[
+          const SizedBox(height: 8),
+          Text('SĐT: ${phone.text.trim().isEmpty ? 'Không ghi' : phone.text}',
+              style: const TextStyle(color: Colors.black54)),
+        ],
         const SizedBox(height: 12),
         TextField(controller: cash, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Tiền mặt')),
         const SizedBox(height: 12),
@@ -1864,7 +2278,8 @@ class _SalePageState extends State<SalePage> {
     try {
       await StoreDb.instance.completeSale(product: product!, quantity: quantity, serialId: serialId, unitPrice: int.tryParse(price.text) ?? 0, customer: customer.text, phone: phone.text, cash: int.tryParse(cash.text) ?? 0, transfer: int.tryParse(transfer.text) ?? 0, warrantyMonths: warrantyMonths);
       customer.clear(); phone.clear(); cash.clear(); transfer.clear(); price.clear(); customWarranty.clear();
-      setState(() { product = null; serialId = null; quantity = 1; warranty = 0; saving = false; });
+      setState(() { product = null; serialId = null; quantity = 1;
+        warranty = 0; selectedCustomerId = 0; saving = false; });
       widget.onChanged();
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Đã tạo hóa đơn')));
     } catch (e) { showError(context, e); setState(() => saving = false); }
@@ -2444,72 +2859,496 @@ class _ReportsPageState extends State<ReportsPage> {
   }
 }
 
-class CustomersPage extends StatelessWidget {
+class CustomerFormPage extends StatefulWidget {
+  const CustomerFormPage({super.key, this.customer});
+  final Map<String, Object?>? customer;
+  @override
+  State<CustomerFormPage> createState() => _CustomerFormPageState();
+}
+
+class _CustomerFormPageState extends State<CustomerFormPage> {
+  late final TextEditingController name;
+  late final TextEditingController phone;
+  late final TextEditingController note;
+  bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    name = TextEditingController(text: '${widget.customer?['customer'] ?? widget.customer?['name'] ?? ''}');
+    phone = TextEditingController(text: '${widget.customer?['phone'] ?? ''}');
+    note = TextEditingController(text: '${widget.customer?['note'] ?? ''}');
+  }
+
+  @override
+  void dispose() {
+    name.dispose();
+    phone.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: Text(widget.customer == null
+        ? 'Thêm khách hàng' : 'Sửa khách hàng')),
+    body: ListView(padding: const EdgeInsets.all(16), children: [
+      TextField(controller: name,
+          decoration: const InputDecoration(labelText: 'Tên khách hàng *')),
+      const SizedBox(height: 12),
+      TextField(controller: phone, keyboardType: TextInputType.phone,
+          decoration: const InputDecoration(labelText: 'Số điện thoại')),
+      const SizedBox(height: 12),
+      TextField(controller: note, maxLines: 3,
+          decoration: const InputDecoration(
+              labelText: 'Ghi chú / quà đã tri ân')),
+      const SizedBox(height: 20),
+      FilledButton.icon(onPressed: saving ? null : save,
+          icon: const Icon(Icons.save), label: const Text('Lưu khách hàng')),
+    ]),
+  );
+
+  Future<void> save() async {
+    setState(() => saving = true);
+    try {
+      final result = widget.customer == null
+          ? await StoreDb.instance.addCustomerDirectory(
+              name: name.text, phone: phone.text, note: note.text)
+          : await StoreDb.instance.updateCustomerDirectory(
+              id: widget.customer!['id'] as int, name: name.text,
+              phone: phone.text, note: note.text);
+      if (mounted) Navigator.pop(context, result);
+    } catch (e) {
+      if (mounted) { showError(context, e); setState(() => saving = false); }
+    }
+  }
+}
+
+class SupplierFormPage extends StatefulWidget {
+  const SupplierFormPage({super.key, this.supplier});
+  final Map<String, Object?>? supplier;
+  @override
+  State<SupplierFormPage> createState() => _SupplierFormPageState();
+}
+
+class _SupplierFormPageState extends State<SupplierFormPage> {
+  late final TextEditingController name;
+  late final TextEditingController phone;
+  late final TextEditingController address;
+  late final TextEditingController note;
+  bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    name = TextEditingController(text: '${widget.supplier?['supplier_name'] ?? widget.supplier?['name'] ?? ''}');
+    phone = TextEditingController(text: '${widget.supplier?['phone'] ?? ''}');
+    address = TextEditingController(text: '${widget.supplier?['address'] ?? ''}');
+    note = TextEditingController(text: '${widget.supplier?['note'] ?? ''}');
+  }
+
+  @override
+  void dispose() {
+    name.dispose();
+    phone.dispose();
+    address.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: Text(widget.supplier == null
+        ? 'Thêm nhà cung cấp' : 'Sửa nhà cung cấp')),
+    body: ListView(padding: const EdgeInsets.all(16), children: [
+      TextField(controller: name,
+          decoration: const InputDecoration(labelText: 'Tên nhà cung cấp *')),
+      const SizedBox(height: 12),
+      TextField(controller: phone, keyboardType: TextInputType.phone,
+          decoration: const InputDecoration(labelText: 'Số điện thoại')),
+      const SizedBox(height: 12),
+      TextField(controller: address,
+          decoration: const InputDecoration(labelText: 'Địa chỉ')),
+      const SizedBox(height: 12),
+      TextField(controller: note, maxLines: 3,
+          decoration: const InputDecoration(labelText: 'Ghi chú')),
+      const SizedBox(height: 20),
+      FilledButton.icon(onPressed: saving ? null : save,
+          icon: const Icon(Icons.save), label: const Text('Lưu nhà cung cấp')),
+    ]),
+  );
+
+  Future<void> save() async {
+    setState(() => saving = true);
+    try {
+      final result = widget.supplier == null
+          ? await StoreDb.instance.addSupplierDirectory(
+              name: name.text, phone: phone.text,
+              address: address.text, note: note.text)
+          : await StoreDb.instance.updateSupplierDirectory(
+              id: widget.supplier!['id'] as int, name: name.text,
+              phone: phone.text, address: address.text, note: note.text);
+      if (mounted) Navigator.pop(context, result);
+    } catch (e) {
+      if (mounted) { showError(context, e); setState(() => saving = false); }
+    }
+  }
+}
+
+class CustomersPage extends StatefulWidget {
   const CustomersPage({super.key});
+  @override
+  State<CustomersPage> createState() => _CustomersPageState();
+}
+
+class _CustomersPageState extends State<CustomersPage> {
+  String search = '';
+  String sort = 'recent';
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Khách hàng')),
+    floatingActionButton: FloatingActionButton.extended(
+      onPressed: add, icon: const Icon(Icons.person_add),
+      label: const Text('Thêm khách')),
     body: FutureBuilder<List<Map<String, Object?>>>(
       future: StoreDb.instance.customers(),
       builder: (context, snap) {
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-        final rows = snap.data!;
-        if (rows.isEmpty) return const EmptyState(Icons.people_outline, 'Chưa có khách hàng', 'Khách sẽ tự xuất hiện sau khi bán hàng.');
-        return ListView.separated(
-          padding: const EdgeInsets.all(16), itemCount: rows.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 8),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            return Card(child: ListTile(
-              leading: const CircleAvatar(child: Icon(Icons.person)),
-              title: Text('${r['customer']}', style: const TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text('${('${r['phone']}').trim().isEmpty ? 'Không ghi SĐT' : r['phone']}\n'
-                  '${r['transaction_count']} giao dịch • Tổng ${vnd(r['total_spent'] as num)}'),
-              isThreeLine: true,
-              trailing: (r['debt'] as num).toInt() > 0
-                  ? Text('Nợ\n${vnd(r['debt'] as num)}', textAlign: TextAlign.right,
-                      style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold))
-                  : const Icon(Icons.check_circle, color: Colors.green),
-            ));
-          },
-        );
+        final allRows = snap.data!;
+        final rows = allRows.where((row) =>
+            '${row['customer']} ${row['phone']}'.toLowerCase()
+                .contains(search)).toList();
+        int number(Map<String, Object?> row, String key) =>
+            (row[key] as num? ?? 0).toInt();
+        if (sort == 'spent') {
+          rows.sort((a, b) => number(b, 'total_spent')
+              .compareTo(number(a, 'total_spent')));
+        } else if (sort == 'count') {
+          rows.sort((a, b) => number(b, 'invoice_count')
+              .compareTo(number(a, 'invoice_count')));
+        } else if (sort == 'quantity') {
+          rows.sort((a, b) => number(b, 'item_quantity')
+              .compareTo(number(a, 'item_quantity')));
+        }
+        return Column(children: [
+          Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            child: TextField(
+              decoration: const InputDecoration(prefixIcon: Icon(Icons.search),
+                  hintText: 'Tìm tên hoặc số điện thoại'),
+              onChanged: (value) => setState(() => search = value.trim().toLowerCase()),
+            )),
+          Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: DropdownButtonFormField<String>(
+              initialValue: sort,
+              decoration: const InputDecoration(labelText: 'Sắp xếp để tri ân'),
+              items: const [
+                DropdownMenuItem(value: 'recent', child: Text('Giao dịch gần đây')),
+                DropdownMenuItem(value: 'count', child: Text('Mua nhiều lần nhất')),
+                DropdownMenuItem(value: 'quantity', child: Text('Mua nhiều sản phẩm nhất')),
+                DropdownMenuItem(value: 'spent', child: Text('Chi tiêu cao nhất')),
+              ],
+              onChanged: (value) => setState(() => sort = value ?? 'recent'),
+            )),
+          const SizedBox(height: 8),
+          Expanded(child: allRows.isEmpty
+              ? const EmptyState(Icons.people_outline, 'Chưa có khách hàng',
+                  'Thêm khách tại đây hoặc khi bán hàng/nhận sửa chữa.')
+              : rows.isEmpty
+                  ? const Center(child: Text('Không tìm thấy khách hàng'))
+                  : ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 90),
+                      itemCount: rows.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, i) {
+                        final r = rows[i];
+                        final invoices = number(r, 'invoice_count');
+                        final quantity = number(r, 'item_quantity');
+                        return Card(child: ListTile(
+                          leading: CircleAvatar(child: Text('${i + 1}')),
+                          title: Text('${r['customer']}',
+                              style: const TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text('${'${r['phone']}'.trim().isEmpty ? 'Không ghi SĐT' : r['phone']}\n'
+                              '$invoices lần mua • $quantity sản phẩm • ${number(r, 'service_count')} lần sửa\n'
+                              'Tổng giao dịch: ${vnd(number(r, 'total_spent'))}'),
+                          isThreeLine: true,
+                          trailing: number(r, 'debt') > 0
+                              ? Text('Nợ\n${vnd(number(r, 'debt'))}', textAlign: TextAlign.right,
+                                  style: const TextStyle(color: Colors.orange,
+                                      fontWeight: FontWeight.bold))
+                              : const Icon(Icons.chevron_right),
+                          onTap: () async {
+                            await Navigator.push(context, MaterialPageRoute(
+                                builder: (_) => CustomerDetailPage(customer: r)));
+                            if (mounted) setState(() {});
+                          },
+                        ));
+                      },
+                    )),
+        ]);
       },
     ),
   );
+
+  Future<void> add() async {
+    final created = await Navigator.push<Map<String, Object?>>(context,
+        MaterialPageRoute(builder: (_) => const CustomerFormPage()));
+    if (created != null && mounted) setState(() {});
+  }
 }
 
-class SuppliersPage extends StatelessWidget {
+class CustomerDetailPage extends StatefulWidget {
+  const CustomerDetailPage({super.key, required this.customer});
+  final Map<String, Object?> customer;
+  @override
+  State<CustomerDetailPage> createState() => _CustomerDetailPageState();
+}
+
+class _CustomerDetailPageState extends State<CustomerDetailPage> {
+  late Map<String, Object?> customer = widget.customer;
+
+  int n(String key) => (customer[key] as num? ?? 0).toInt();
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: Text('${customer['customer']}'), actions: [
+      IconButton(onPressed: edit, icon: const Icon(Icons.edit_outlined),
+          tooltip: 'Sửa khách hàng'),
+    ]),
+    body: FutureBuilder<List<Object?>>(
+      future: Future.wait<Object?>([
+        StoreDb.instance.customerSales('${customer['customer']}', '${customer['phone']}'),
+        StoreDb.instance.customerRepairs('${customer['customer']}', '${customer['phone']}'),
+      ]),
+      builder: (context, snap) {
+        if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+        final sales = snap.data![0] as List<Map<String, Object?>>;
+        final repairs = snap.data![1] as List<Map<String, Object?>>;
+        return ListView(padding: const EdgeInsets.all(16), children: [
+          Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${customer['customer']}',
+                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              infoLine('Số điện thoại', textOrDash(customer['phone'])),
+              infoLine('Số lần mua', '${n('invoice_count')}'),
+              infoLine('Số hàng đã mua', '${n('item_quantity')} sản phẩm'),
+              infoLine('Tiền mua hàng', vnd(n('sale_value'))),
+              infoLine('Số lần sửa chữa', '${n('service_count')}'),
+              infoLine('Tổng giao dịch', vnd(n('total_spent'))),
+              infoLine('Còn nợ', vnd(n('debt'))),
+              infoLine('Lần gần nhất', formatDateTime(customer['last_purchase'])),
+              if ('${customer['note']}'.trim().isNotEmpty)
+                infoLine('Ghi chú tri ân', '${customer['note']}'),
+            ],
+          ))),
+          const SizedBox(height: 16),
+          Text('Lịch sử mua hàng (${sales.length})',
+              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (sales.isEmpty)
+            const Card(child: Padding(padding: EdgeInsets.all(16),
+                child: Text('Khách chưa có hóa đơn mua hàng.'))),
+          ...sales.map((sale) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Card(child: ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.receipt_long)),
+              title: Text('${sale['code']} • ${vnd(sale['total'] as num)}',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('${formatDateTime(sale['created_at'])}\n'
+                  '${sale['product_names'] ?? 'Hàng hóa'} • ${sale['item_quantity']} sản phẩm'),
+              isThreeLine: true,
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => InvoiceDetailPage(saleId: sale['id'] as int))),
+            )),
+          )),
+          const SizedBox(height: 10),
+          Text('Lịch sử sửa chữa (${repairs.length})',
+              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (repairs.isEmpty)
+            const Card(child: Padding(padding: EdgeInsets.all(16),
+                child: Text('Khách chưa có phiếu sửa chữa.'))),
+          ...repairs.map((repair) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Card(child: ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.build)),
+              title: Text('${repair['device']} • ${vnd(repair['amount'] as num)}',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('${repair['code']} • ${formatDateTime(repair['received_at'])}\n'
+                  '${repairStatus('${repair['status']}')}'),
+              isThreeLine: true,
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => RepairDetailPage(repair: repair))),
+            )),
+          )),
+        ]);
+      },
+    ),
+  );
+
+  Future<void> edit() async {
+    final changed = await Navigator.push<Map<String, Object?>>(context,
+        MaterialPageRoute(builder: (_) => CustomerFormPage(customer: customer)));
+    if (changed == null) return;
+    final rows = await StoreDb.instance.customers();
+    final fresh = rows.where((row) => row['id'] == changed['id']);
+    if (fresh.isNotEmpty && mounted) setState(() => customer = fresh.first);
+  }
+}
+
+class SuppliersPage extends StatefulWidget {
   const SuppliersPage({super.key});
+  @override
+  State<SuppliersPage> createState() => _SuppliersPageState();
+}
+
+class _SuppliersPageState extends State<SuppliersPage> {
+  String search = '';
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Nhà cung cấp')),
+    floatingActionButton: FloatingActionButton.extended(
+      onPressed: add, icon: const Icon(Icons.add_business),
+      label: const Text('Thêm nhà cung cấp')),
+    body: Column(children: [
+      Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        child: TextField(
+          decoration: const InputDecoration(prefixIcon: Icon(Icons.search),
+              hintText: 'Tìm tên hoặc số điện thoại'),
+          onChanged: (value) => setState(() => search = value.trim().toLowerCase()),
+        )),
+      Expanded(child: FutureBuilder<List<Map<String, Object?>>>(
+        future: StoreDb.instance.suppliers(),
+        builder: (context, snap) {
+          if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+          final allRows = snap.data!;
+          final rows = allRows.where((row) =>
+              '${row['supplier_name']} ${row['phone']}'.toLowerCase()
+                  .contains(search)).toList();
+          if (allRows.isEmpty) return const EmptyState(
+              Icons.local_shipping_outlined, 'Chưa có nhà cung cấp',
+              'Thêm tại đây hoặc ngay khi lập phiếu nhập hàng.');
+          if (rows.isEmpty) return const Center(child: Text('Không tìm thấy nhà cung cấp'));
+          return ListView.separated(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 90),
+            itemCount: rows.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            itemBuilder: (context, i) {
+              final r = rows[i];
+              final debt = (r['debt'] as num? ?? 0).toInt();
+              return Card(child: ListTile(
+                leading: const CircleAvatar(child: Icon(Icons.local_shipping)),
+                title: Text('${r['supplier_name']}',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text('${r['purchase_count']} lần nhập • ${r['total_quantity']} sản phẩm\n'
+                    'Tổng đã nhập: ${vnd(r['total_purchase'] as num)}\n'
+                    'Gần nhất: ${formatDateTime(r['last_purchase'])}'),
+                isThreeLine: true,
+                trailing: debt > 0
+                    ? Text('Còn nợ\n${vnd(debt)}', textAlign: TextAlign.right,
+                        style: const TextStyle(color: Colors.orange,
+                            fontWeight: FontWeight.bold))
+                    : const Icon(Icons.chevron_right),
+                onTap: () async {
+                  await Navigator.push(context, MaterialPageRoute(
+                      builder: (_) => SupplierDetailPage(supplier: r)));
+                  if (mounted) setState(() {});
+                },
+              ));
+            },
+          );
+        },
+      )),
+    ]),
+  );
+
+  Future<void> add() async {
+    final created = await Navigator.push<Map<String, Object?>>(context,
+        MaterialPageRoute(builder: (_) => const SupplierFormPage()));
+    if (created != null && mounted) setState(() {});
+  }
+}
+
+class SupplierDetailPage extends StatefulWidget {
+  const SupplierDetailPage({super.key, required this.supplier});
+  final Map<String, Object?> supplier;
+  @override
+  State<SupplierDetailPage> createState() => _SupplierDetailPageState();
+}
+
+class _SupplierDetailPageState extends State<SupplierDetailPage> {
+  late Map<String, Object?> supplier = widget.supplier;
+  int n(String key) => (supplier[key] as num? ?? 0).toInt();
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: Text('${supplier['supplier_name']}'), actions: [
+      IconButton(onPressed: edit, icon: const Icon(Icons.edit_outlined),
+          tooltip: 'Sửa nhà cung cấp'),
+    ]),
     body: FutureBuilder<List<Map<String, Object?>>>(
-      future: StoreDb.instance.suppliers(),
+      future: StoreDb.instance.supplierPurchases('${supplier['supplier_name']}'),
       builder: (context, snap) {
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
         final rows = snap.data!;
-        if (rows.isEmpty) return const EmptyState(Icons.local_shipping_outlined, 'Chưa có nhà cung cấp', 'Nhà cung cấp sẽ tự xuất hiện từ phiếu nhập hàng.');
-        return ListView.separated(
-          padding: const EdgeInsets.all(16), itemCount: rows.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 8),
-          itemBuilder: (context, i) {
-            final r = rows[i];
-            return Card(child: ListTile(
-              leading: const CircleAvatar(child: Icon(Icons.local_shipping)),
-              title: Text('${r['supplier_name']}', style: const TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text('${r['purchase_count']} phiếu nhập • Tổng ${vnd(r['total_purchase'] as num)}\n'
-                  'Lần gần nhất: ${formatDateTime(r['last_purchase'])}'),
-              isThreeLine: true,
-              trailing: (r['debt'] as num).toInt() > 0
-                  ? Text('Còn nợ\n${vnd(r['debt'] as num)}', textAlign: TextAlign.right,
-                      style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold))
-                  : const Icon(Icons.check_circle, color: Colors.green),
-            ));
-          },
-        );
+        return ListView(padding: const EdgeInsets.all(16), children: [
+          Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${supplier['supplier_name']}',
+                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              infoLine('Số điện thoại', textOrDash(supplier['phone'])),
+              infoLine('Địa chỉ', textOrDash(supplier['address'])),
+              infoLine('Số lần nhập', '${n('purchase_count')}'),
+              infoLine('Số hàng đã nhập', '${n('total_quantity')} sản phẩm'),
+              infoLine('Tổng tiền nhập', vnd(n('total_purchase'))),
+              infoLine('Còn nợ NCC', vnd(n('debt'))),
+              infoLine('Lần gần nhất', formatDateTime(supplier['last_purchase'])),
+              if ('${supplier['note']}'.trim().isNotEmpty)
+                infoLine('Ghi chú', '${supplier['note']}'),
+            ],
+          ))),
+          const SizedBox(height: 16),
+          Text('Lịch sử nhập hàng (${rows.length})',
+              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (rows.isEmpty)
+            const Card(child: Padding(padding: EdgeInsets.all(16),
+                child: Text('Chưa có phiếu nhập từ nhà cung cấp này.'))),
+          ...rows.map((purchase) {
+            final total = (purchase['total'] as num? ?? 0).toInt();
+            final paid = (purchase['paid'] as num? ?? 0).toInt();
+            return Padding(padding: const EdgeInsets.only(bottom: 8),
+              child: Card(child: ListTile(
+                leading: const CircleAvatar(child: Icon(Icons.inventory)),
+                title: Text('${purchase['code']} • ${vnd(total)}',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text('${formatDateTime(purchase['created_at'])}\n'
+                    '${purchase['product_names'] ?? 'Hàng hóa'}\n'
+                    '${purchase['total_quantity']} sản phẩm • Đã trả ${vnd(paid)}'),
+                isThreeLine: true,
+                trailing: total > paid
+                    ? Text('Nợ ${vnd(total - paid)}',
+                        style: const TextStyle(color: Colors.orange,
+                            fontWeight: FontWeight.bold))
+                    : const Icon(Icons.check_circle, color: Colors.green),
+              )));
+          }),
+        ]);
       },
     ),
   );
+
+  Future<void> edit() async {
+    final changed = await Navigator.push<Map<String, Object?>>(context,
+        MaterialPageRoute(builder: (_) => SupplierFormPage(supplier: supplier)));
+    if (changed == null) return;
+    final rows = await StoreDb.instance.suppliers();
+    final fresh = rows.where((row) => row['id'] == changed['id']);
+    if (fresh.isNotEmpty && mounted) setState(() => supplier = fresh.first);
+  }
 }
 
 class StocktakePage extends StatefulWidget {
@@ -2765,15 +3604,77 @@ class _RepairFormState extends State<RepairForm> {
   final partsCost = TextEditingController();
   final paid = TextEditingController();
   final note = TextEditingController();
+  List<Map<String, Object?>> customers = [];
+  int selectedCustomerId = 0;
   bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCustomers();
+  }
+
+  Future<void> _loadCustomers({int? selectId}) async {
+    final rows = await StoreDb.instance.customerDirectory();
+    if (!mounted) return;
+    setState(() {
+      customers = rows;
+      if (selectId != null) {
+        selectedCustomerId = selectId;
+        final selected = rows.where((row) => row['id'] == selectId);
+        if (selected.isNotEmpty) {
+          customer.text = '${selected.first['name']}';
+          phone.text = '${selected.first['phone']}';
+        }
+      }
+    });
+  }
+
+  Future<void> _pickCustomer(int? id) async {
+    if (id == null) return;
+    if (id == -1) {
+      final created = await Navigator.push<Map<String, Object?>>(context,
+          MaterialPageRoute(builder: (_) => const CustomerFormPage()));
+      if (created != null) {
+        await _loadCustomers(selectId: created['id'] as int);
+      }
+      return;
+    }
+    setState(() {
+      selectedCustomerId = id;
+      final selected = customers.where((row) => row['id'] == id);
+      customer.text = id == 0 || selected.isEmpty
+          ? '' : '${selected.first['name']}';
+      phone.text = id == 0 || selected.isEmpty
+          ? '' : '${selected.first['phone']}';
+    });
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Nhận máy sửa chữa')),
     body: ListView(padding: const EdgeInsets.all(16), children: [
-      TextField(controller: customer, decoration: const InputDecoration(labelText: 'Khách hàng')),
-      const SizedBox(height: 12),
-      TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Số điện thoại')),
+      DropdownButtonFormField<int>(
+        key: ValueKey('repair-customer-$selectedCustomerId-${customers.length}'),
+        initialValue: selectedCustomerId,
+        isExpanded: true,
+        decoration: const InputDecoration(
+            labelText: 'Khách hàng', prefixIcon: Icon(Icons.person)),
+        items: [
+          const DropdownMenuItem(value: 0, child: Text('Khách lẻ')),
+          ...customers.map((row) => DropdownMenuItem(
+              value: row['id'] as int,
+              child: Text('${row['name']}${'${row['phone']}'.trim().isEmpty ? '' : ' • ${row['phone']}'}'))),
+          const DropdownMenuItem(value: -1,
+              child: Text('+ Thêm khách hàng mới')),
+        ],
+        onChanged: _pickCustomer,
+      ),
+      if (selectedCustomerId > 0) ...[
+        const SizedBox(height: 8),
+        Text('SĐT: ${phone.text.trim().isEmpty ? 'Không ghi' : phone.text}',
+            style: const TextStyle(color: Colors.black54)),
+      ],
       const SizedBox(height: 12),
       TextField(controller: device, decoration: const InputDecoration(labelText: 'Tên máy *')),
       const SizedBox(height: 12),
