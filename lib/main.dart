@@ -740,6 +740,108 @@ class StoreDb {
     }
   }
 
+  Future<Map<String, int>> reportSummary(DateTime start, DateTime end) async {
+    final db = await database;
+    final from = start.toIso8601String();
+    final to = end.toIso8601String();
+    final sale = (await db.rawQuery('''SELECT
+      COALESCE(SUM(total),0) revenue,
+      COALESCE(SUM(total-cost_total),0) gross_profit,
+      COALESCE(SUM(debt),0) debt,
+      COALESCE(SUM(paid_cash+paid_transfer),0) collected,
+      COUNT(*) invoices
+      FROM sales
+      WHERE status='completed' AND created_at>=? AND created_at<?''',
+      [from, to])).single;
+    final sold = (await db.rawQuery('''SELECT
+      COALESCE(SUM(si.quantity),0) products_sold
+      FROM sale_items si
+      JOIN sales s ON s.id=si.sale_id
+      WHERE s.status='completed' AND s.created_at>=? AND s.created_at<?''',
+      [from, to])).single;
+    final repair = (await db.rawQuery('''SELECT
+      COALESCE(SUM(amount),0) revenue,
+      COALESCE(SUM(amount-parts_cost),0) gross_profit,
+      COUNT(*) repairs
+      FROM repairs
+      WHERE status IN ('completed','returned')
+        AND COALESCE(completed_at,received_at)>=?
+        AND COALESCE(completed_at,received_at)<?''', [from, to])).single;
+    final cash = (await db.rawQuery('''SELECT
+      COALESCE(SUM(CASE WHEN entry_type='income' THEN amount ELSE 0 END),0) other_income,
+      COALESCE(SUM(CASE WHEN entry_type='expense' THEN amount ELSE 0 END),0) expenses
+      FROM cash_entries
+      WHERE created_at>=? AND created_at<?''', [from, to])).single;
+    int n(Map<String, Object?> row, String key) =>
+        (row[key] as num? ?? 0).toInt();
+    final salesRevenue = n(sale, 'revenue');
+    final repairRevenue = n(repair, 'revenue');
+    final grossProfit =
+        n(sale, 'gross_profit') + n(repair, 'gross_profit');
+    final otherIncome = n(cash, 'other_income');
+    final expenses = n(cash, 'expenses');
+    return {
+      'revenue': salesRevenue + repairRevenue,
+      'sales_revenue': salesRevenue,
+      'repair_revenue': repairRevenue,
+      'gross_profit': grossProfit,
+      'other_income': otherIncome,
+      'expenses': expenses,
+      'net_profit': grossProfit + otherIncome - expenses,
+      'debt': n(sale, 'debt'),
+      'collected': n(sale, 'collected'),
+      'invoices': n(sale, 'invoices'),
+      'products_sold': n(sold, 'products_sold'),
+      'repairs': n(repair, 'repairs'),
+    };
+  }
+
+  Future<List<Map<String, Object?>>> productReport(
+      DateTime start, DateTime end) async {
+    final db = await database;
+    return db.rawQuery('''SELECT p.id, p.code, p.name, p.category,
+      CASE WHEN p.track_imei=1 THEN
+        (SELECT COUNT(*) FROM serial_units su
+         WHERE su.product_id=p.id AND su.status='in_stock')
+      ELSE p.quantity END stock,
+      CASE WHEN p.track_imei=1 THEN
+        COALESCE((SELECT SUM(su.cost) FROM serial_units su
+         WHERE su.product_id=p.id AND su.status='in_stock'),0)
+      ELSE p.quantity*p.avg_cost END stock_value,
+      COALESCE(r.sold_quantity,0) sold_quantity,
+      COALESCE(r.revenue,0) revenue,
+      COALESCE(r.profit,0) profit
+      FROM products p
+      LEFT JOIN (
+        SELECT si.product_id,
+          SUM(si.quantity) sold_quantity,
+          SUM(si.quantity*si.unit_price) revenue,
+          SUM(si.quantity*(si.unit_price-si.unit_cost)) profit
+        FROM sale_items si
+        JOIN sales s ON s.id=si.sale_id
+        WHERE s.status='completed' AND s.created_at>=? AND s.created_at<?
+        GROUP BY si.product_id
+      ) r ON r.product_id=p.id
+      WHERE p.active=1
+      ORDER BY revenue DESC, p.name''',
+      [start.toIso8601String(), end.toIso8601String()]);
+  }
+
+  Future<List<Map<String, Object?>>> invoiceReport(
+      DateTime start, DateTime end) async {
+    final db = await database;
+    return db.rawQuery('''SELECT s.*, s.total-s.cost_total profit,
+      GROUP_CONCAT(p.name, ' • ') product_names,
+      GROUP_CONCAT(COALESCE(su.imei, ''), ' ') imeis
+      FROM sales s
+      LEFT JOIN sale_items si ON si.sale_id=s.id
+      LEFT JOIN products p ON p.id=si.product_id
+      LEFT JOIN serial_units su ON su.id=si.serial_id
+      WHERE s.status='completed' AND s.created_at>=? AND s.created_at<?
+      GROUP BY s.id ORDER BY s.created_at DESC''',
+      [start.toIso8601String(), end.toIso8601String()]);
+  }
+
   Future<Map<String, int>> dashboard() async {
     final db = await database;
     final salesRows = await db.rawQuery('''SELECT
@@ -1018,7 +1120,16 @@ class DashboardPage extends StatelessWidget {
             const Text('Minh Cảnh Mobile', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w800, color: Color(0xff0877d1))),
             const Text('Uy tín dẫn đầu – Chất lượng bền lâu'),
             const SizedBox(height: 20),
-            const Text('Tổng quan', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            Row(children: [
+              const Expanded(child: Text('Tổng quan',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold))),
+              TextButton.icon(
+                onPressed: () => Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => const ReportsPage())),
+                icon: const Icon(Icons.assessment_outlined),
+                label: const Text('Xem báo cáo'),
+              ),
+            ]),
             const SizedBox(height: 12),
             GridView.count(
               shrinkWrap: true,
@@ -1589,6 +1700,12 @@ class MorePage extends StatelessWidget {
       MenuAction(Icons.delete_sweep, 'Xuất hủy', () async { final ok = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => const InventoryActionPage(kind: 'discard'))); if (ok == true) onChanged(); }),
     ]),
     const SizedBox(height: 12),
+    MenuGroup('Báo cáo', [
+      MenuAction(Icons.assessment, 'Báo cáo tổng hợp', () =>
+          Navigator.push(context, MaterialPageRoute(
+              builder: (_) => const ReportsPage()))),
+    ]),
+    const SizedBox(height: 12),
     MenuGroup('Quản lý', [
       MenuAction(Icons.people, 'Khách hàng', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CustomersPage()))),
       MenuAction(Icons.local_shipping, 'Nhà cung cấp', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SuppliersPage()))),
@@ -1602,6 +1719,405 @@ class MorePage extends StatelessWidget {
       MenuAction(Icons.password, 'Đổi mã PIN', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ChangePinPage()))),
     ]),
   ]);
+}
+
+class ReportsPage extends StatefulWidget {
+  const ReportsPage({super.key});
+  @override
+  State<ReportsPage> createState() => _ReportsPageState();
+}
+
+class _ReportsPageState extends State<ReportsPage> {
+  String period = 'month';
+  DateTime anchor = DateTime.now();
+  DateTimeRange? customRange;
+
+  DateTimeRange get range {
+    if (period == 'custom' && customRange != null) return customRange!;
+    if (period == 'day') {
+      final start = DateTime(anchor.year, anchor.month, anchor.day);
+      return DateTimeRange(start: start, end: start.add(const Duration(days: 1)));
+    }
+    if (period == 'quarter') {
+      final firstMonth = ((anchor.month - 1) ~/ 3) * 3 + 1;
+      final start = DateTime(anchor.year, firstMonth);
+      return DateTimeRange(start: start, end: DateTime(anchor.year, firstMonth + 3));
+    }
+    if (period == 'year') {
+      final start = DateTime(anchor.year);
+      return DateTimeRange(start: start, end: DateTime(anchor.year + 1));
+    }
+    final start = DateTime(anchor.year, anchor.month);
+    return DateTimeRange(start: start, end: DateTime(anchor.year, anchor.month + 1));
+  }
+
+  String get rangeLabel {
+    final current = range;
+    if (period == 'day') return DateFormat('dd/MM/yyyy').format(current.start);
+    if (period == 'month') return 'Tháng ${DateFormat('MM/yyyy').format(current.start)}';
+    if (period == 'quarter') {
+      final quarter = ((current.start.month - 1) ~/ 3) + 1;
+      return 'Quý $quarter/${current.start.year}';
+    }
+    if (period == 'year') return 'Năm ${current.start.year}';
+    final inclusiveEnd = current.end.subtract(const Duration(days: 1));
+    return '${DateFormat('dd/MM/yyyy').format(current.start)} – '
+        '${DateFormat('dd/MM/yyyy').format(inclusiveEnd)}';
+  }
+
+  void shiftPeriod(int amount) {
+    setState(() {
+      if (period == 'day') {
+        anchor = anchor.add(Duration(days: amount));
+      } else if (period == 'month') {
+        anchor = DateTime(anchor.year, anchor.month + amount, 1);
+      } else if (period == 'quarter') {
+        anchor = DateTime(anchor.year, anchor.month + amount * 3, 1);
+      } else if (period == 'year') {
+        anchor = DateTime(anchor.year + amount, anchor.month, 1);
+      }
+    });
+  }
+
+  Future<void> pickCustomRange() async {
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(now.year + 5, 12, 31),
+      initialDateRange: customRange == null
+          ? DateTimeRange(
+              start: DateTime(now.year, now.month, 1),
+              end: DateTime(now.year, now.month, now.day))
+          : DateTimeRange(
+              start: customRange!.start,
+              end: customRange!.end.subtract(const Duration(days: 1))),
+      helpText: 'Chọn khoảng thời gian báo cáo',
+      cancelText: 'Hủy',
+      confirmText: 'Xem báo cáo',
+      saveText: 'Xong',
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      period = 'custom';
+      customRange = DateTimeRange(
+          start: DateTime(picked.start.year, picked.start.month, picked.start.day),
+          end: DateTime(picked.end.year, picked.end.month, picked.end.day)
+              .add(const Duration(days: 1)));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedRange = range;
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Báo cáo'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(text: 'Doanh thu'),
+              Tab(text: 'Hàng hóa'),
+              Tab(text: 'Hóa đơn'),
+            ],
+          ),
+        ),
+        body: Column(children: [
+          _filterPanel(),
+          Expanded(
+            child: FutureBuilder<List<Object?>>(
+              future: Future.wait<Object?>([
+                StoreDb.instance.reportSummary(
+                    selectedRange.start, selectedRange.end),
+                StoreDb.instance.productReport(
+                    selectedRange.start, selectedRange.end),
+                StoreDb.instance.invoiceReport(
+                    selectedRange.start, selectedRange.end),
+              ]),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState != ConnectionState.done) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (snapshot.hasError) {
+                  return Center(child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text('Không thể tải báo cáo: ${snapshot.error}',
+                        textAlign: TextAlign.center),
+                  ));
+                }
+                final summary = snapshot.data![0] as Map<String, int>;
+                final products =
+                    snapshot.data![1] as List<Map<String, Object?>>;
+                final invoices =
+                    snapshot.data![2] as List<Map<String, Object?>>;
+                return TabBarView(children: [
+                  _summaryTab(summary),
+                  _productTab(products),
+                  _invoiceTab(invoices),
+                ]);
+              },
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _filterPanel() => Material(
+    color: Colors.white,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      child: Column(children: [
+        Row(children: [
+          Expanded(child: DropdownButtonFormField<String>(
+            initialValue: period,
+            isDense: true,
+            decoration: const InputDecoration(
+                labelText: 'Xem báo cáo theo',
+                prefixIcon: Icon(Icons.calendar_month)),
+            items: const [
+              DropdownMenuItem(value: 'day', child: Text('Ngày')),
+              DropdownMenuItem(value: 'month', child: Text('Tháng')),
+              DropdownMenuItem(value: 'quarter', child: Text('Quý')),
+              DropdownMenuItem(value: 'year', child: Text('Năm')),
+              DropdownMenuItem(value: 'custom', child: Text('Tùy chọn')),
+            ],
+            onChanged: (value) {
+              if (value == null) return;
+              if (value == 'custom') {
+                pickCustomRange();
+              } else {
+                setState(() {
+                  period = value;
+                  customRange = null;
+                });
+              }
+            },
+          )),
+          const SizedBox(width: 8),
+          IconButton.filledTonal(
+            tooltip: 'Chọn ngày',
+            onPressed: pickCustomRange,
+            icon: const Icon(Icons.date_range),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          IconButton(
+            tooltip: 'Kỳ trước',
+            onPressed: period == 'custom' ? null : () => shiftPeriod(-1),
+            icon: const Icon(Icons.chevron_left),
+          ),
+          Expanded(child: Text(rangeLabel,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
+          IconButton(
+            tooltip: 'Kỳ sau',
+            onPressed: period == 'custom' ? null : () => shiftPeriod(1),
+            icon: const Icon(Icons.chevron_right),
+          ),
+        ]),
+      ]),
+    ),
+  );
+
+  Widget _summaryTab(Map<String, int> data) {
+    final net = data['net_profit'] ?? 0;
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text('Kết quả $rangeLabel',
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 12),
+        GridView.count(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisCount: 2,
+          childAspectRatio: 1.35,
+          crossAxisSpacing: 10,
+          mainAxisSpacing: 10,
+          children: [
+            MetricCard('Tổng doanh thu', vnd(data['revenue'] ?? 0),
+                Icons.trending_up, Colors.blue),
+            MetricCard('Lợi nhuận gộp', vnd(data['gross_profit'] ?? 0),
+                Icons.account_balance_wallet, Colors.green),
+            MetricCard('Chi phí sổ quỹ', vnd(data['expenses'] ?? 0),
+                Icons.payments_outlined, Colors.orange),
+            MetricCard('Lợi nhuận sau chi phí', vnd(net),
+                Icons.savings, net < 0 ? Colors.red : Colors.teal),
+            MetricCard('Hóa đơn bán', '${data['invoices'] ?? 0}',
+                Icons.receipt_long, Colors.cyan),
+            MetricCard('Sản phẩm đã bán', '${data['products_sold'] ?? 0}',
+                Icons.shopping_bag, Colors.indigo),
+          ],
+        ),
+        const SizedBox(height: 14),
+        Card(child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(children: [
+            infoLine('Bán hàng', vnd(data['sales_revenue'] ?? 0)),
+            infoLine('Dịch vụ sửa chữa', vnd(data['repair_revenue'] ?? 0)),
+            infoLine('Thu khác', vnd(data['other_income'] ?? 0)),
+            infoLine('Khách còn nợ', vnd(data['debt'] ?? 0)),
+            infoLine('Đã thu từ hóa đơn', vnd(data['collected'] ?? 0)),
+            infoLine('Phiếu sửa hoàn tất', '${data['repairs'] ?? 0}'),
+          ]),
+        )),
+        const SizedBox(height: 12),
+        const Card(child: Padding(
+          padding: EdgeInsets.all(14),
+          child: Text(
+            'Lợi nhuận sau chi phí = lợi nhuận bán hàng và sửa chữa '
+            '+ thu khác − các khoản chi trong Sổ quỹ.',
+            style: TextStyle(color: Colors.black54),
+          ),
+        )),
+      ],
+    );
+  }
+
+  Widget _productTab(List<Map<String, Object?>> rows) {
+    if (rows.isEmpty) {
+      return const EmptyState(Icons.inventory_2_outlined, 'Chưa có hàng hóa',
+          'Hãy nhập hàng để xem báo cáo.');
+    }
+    final totalStock = rows.fold<int>(
+        0, (sum, row) => sum + (row['stock'] as num? ?? 0).toInt());
+    final stockValue = rows.fold<int>(
+        0, (sum, row) => sum + (row['stock_value'] as num? ?? 0).toInt());
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text('Báo cáo hàng hóa • $rangeLabel',
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 10),
+        Card(child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(children: [
+            Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Tổng tồn hiện tại'),
+                Text('$totalStock sản phẩm',
+                    style: const TextStyle(
+                        fontSize: 19, fontWeight: FontWeight.bold)),
+              ],
+            )),
+            Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                const Text('Giá trị tồn'),
+                Text(vnd(stockValue),
+                    style: const TextStyle(
+                        fontSize: 19, fontWeight: FontWeight.bold,
+                        color: Colors.indigo)),
+              ],
+            )),
+          ]),
+        )),
+        const SizedBox(height: 10),
+        ...rows.map((row) {
+          final sold = (row['sold_quantity'] as num? ?? 0).toInt();
+          final revenue = (row['revenue'] as num? ?? 0).toInt();
+          final profit = (row['profit'] as num? ?? 0).toInt();
+          final stock = (row['stock'] as num? ?? 0).toInt();
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Card(child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: sold > 0
+                    ? Colors.blue.shade50 : Colors.grey.shade100,
+                child: Icon(Icons.inventory_2,
+                    color: sold > 0 ? Colors.blue : Colors.grey),
+              ),
+              title: Text('${row['name']}',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text(
+                  '${row['code']} • Tồn: $stock • Đã bán: $sold\n'
+                  'Doanh thu: ${vnd(revenue)} • Lãi: ${vnd(profit)}'),
+              isThreeLine: true,
+            )),
+          );
+        }),
+      ],
+    );
+  }
+
+  Widget _invoiceTab(List<Map<String, Object?>> rows) {
+    if (rows.isEmpty) {
+      return EmptyState(Icons.receipt_long_outlined, 'Không có hóa đơn',
+          'Không có hóa đơn bán hàng trong $rangeLabel.');
+    }
+    final total = rows.fold<int>(
+        0, (sum, row) => sum + (row['total'] as num? ?? 0).toInt());
+    final profit = rows.fold<int>(
+        0, (sum, row) => sum + (row['profit'] as num? ?? 0).toInt());
+    final widgets = <Widget>[
+      Text('Báo cáo hóa đơn • $rangeLabel',
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 10),
+      Card(child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(children: [
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Số hóa đơn'),
+              Text('${rows.length}',
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            ],
+          )),
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(vnd(total),
+                  style: const TextStyle(
+                      fontSize: 19, fontWeight: FontWeight.bold,
+                      color: Colors.blue)),
+              Text('Lãi ${vnd(profit)}',
+                  style: const TextStyle(color: Colors.green)),
+            ],
+          )),
+        ]),
+      )),
+      const SizedBox(height: 12),
+    ];
+    String? lastDay;
+    for (final row in rows) {
+      final date = parseDate(row['created_at']) ?? DateTime.now();
+      final day = DateFormat('dd/MM/yyyy').format(date);
+      if (day != lastDay) {
+        widgets.add(Padding(
+          padding: const EdgeInsets.fromLTRB(4, 12, 4, 6),
+          child: Text(day,
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        ));
+        lastDay = day;
+      }
+      widgets.add(Card(child: ListTile(
+        leading: const CircleAvatar(child: Icon(Icons.receipt_long)),
+        title: Text('${row['code']} • ${row['customer']}',
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text(
+            '${DateFormat('HH:mm').format(date)} • ${row['product_names'] ?? ''}'
+            '${'${row['imeis'] ?? ''}'.trim().isEmpty ? '' : ' • IMEI ${row['imeis']}'}'),
+        trailing: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(vnd((row['total'] as num).toInt()),
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text('Lãi ${vnd((row['profit'] as num).toInt())}',
+                style: const TextStyle(fontSize: 12, color: Colors.green)),
+          ],
+        ),
+        onTap: () => Navigator.push(context, MaterialPageRoute(
+            builder: (_) => InvoiceDetailPage(saleId: row['id'] as int))),
+      )));
+    }
+    return ListView(padding: const EdgeInsets.all(16), children: widgets);
+  }
 }
 
 class CustomersPage extends StatelessWidget {
