@@ -60,7 +60,7 @@ class StoreDb {
 
   Future<Database> _open() async {
     final file = p.join(await getDatabasesPath(), 'minh_canh_mobile_v3.db');
-    return openDatabase(file, version: 3, onConfigure: (db) async {
+    return openDatabase(file, version: 4, onConfigure: (db) async {
       await db.execute('PRAGMA foreign_keys = ON');
     }, onCreate: (db, version) async {
       await db.execute('''CREATE TABLE products(
@@ -146,9 +146,11 @@ class StoreDb {
       )''');
       await _createV2Tables(db);
       await _createV3Tables(db);
+      await _createV4Tables(db);
     }, onUpgrade: (db, oldVersion, newVersion) async {
       if (oldVersion < 2) await _createV2Tables(db);
       if (oldVersion < 3) await _createV3Tables(db);
+      if (oldVersion < 4) await _createV4Tables(db);
     });
   }
 
@@ -228,6 +230,19 @@ class StoreDb {
       idx_supplier_directory_name
       ON supplier_directory(name COLLATE NOCASE)''');
     await _backfillDirectories(db);
+  }
+
+  Future<void> _createV4Tables(DatabaseExecutor db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS debt_adjustments(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      party_type TEXT NOT NULL,
+      party_id INTEGER NOT NULL,
+      amount_delta INTEGER NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    )''');
+    await db.execute('''CREATE INDEX IF NOT EXISTS idx_debt_adjustments_party
+      ON debt_adjustments(party_type, party_id, created_at)''');
   }
 
   Future<void> _backfillDirectories(DatabaseExecutor db) async {
@@ -403,12 +418,18 @@ class StoreDb {
       if (tracks && serials.length != quantity) {
         throw Exception('Số IMEI phải đúng bằng số lượng nhập');
       }
+      if (unitCost < 0 || serials.any((serial) => serial.cost < 0)) {
+        throw Exception('Giá nhập không hợp lệ');
+      }
       final now = DateTime.now().toIso8601String();
       final code = 'PN${DateTime.now().millisecondsSinceEpoch}';
-      await _ensureSupplier(txn, supplier);
       final purchaseTotal = tracks
           ? serials.fold<int>(0, (sum, serial) => sum + serial.cost)
           : quantity * unitCost;
+      if (paid < 0 || paid > purchaseTotal) {
+        throw Exception('Số tiền đã thanh toán không hợp lệ');
+      }
+      await _ensureSupplier(txn, supplier);
       final purchaseId = await txn.insert('purchases', {
         'code': code,
         'supplier': supplier,
@@ -802,6 +823,10 @@ class StoreDb {
           MAX(received_at) last_service
         FROM repairs WHERE status!='cancelled'
         GROUP BY LOWER(TRIM(customer)), TRIM(phone)
+      ), debt_stats AS (
+        SELECT party_id, COALESCE(SUM(amount_delta),0) debt_adjustment
+        FROM debt_adjustments WHERE party_type='customer'
+        GROUP BY party_id
       )
       SELECT c.id, c.name customer, c.phone, c.note,
         COALESCE(ss.invoice_count,0) invoice_count,
@@ -812,7 +837,8 @@ class StoreDb {
         COALESCE(ss.sale_value,0) sale_value,
         COALESCE(rs.service_value,0) service_value,
         COALESCE(ss.sale_value,0)+COALESCE(rs.service_value,0) total_spent,
-        COALESCE(ss.sale_debt,0)+COALESCE(rs.service_debt,0) debt,
+        MAX(0, COALESCE(ss.sale_debt,0)+COALESCE(rs.service_debt,0)
+          +COALESCE(ds.debt_adjustment,0)) debt,
         CASE WHEN COALESCE(ss.last_sale,'')>=COALESCE(rs.last_service,'')
           THEN ss.last_sale ELSE rs.last_service END last_purchase
       FROM customer_directory c
@@ -822,6 +848,7 @@ class StoreDb {
         AND qs.phone_key=TRIM(c.phone)
       LEFT JOIN repair_stats rs ON rs.name_key=LOWER(TRIM(c.name))
         AND rs.phone_key=TRIM(c.phone)
+      LEFT JOIN debt_stats ds ON ds.party_id=c.id
       ORDER BY CASE WHEN last_purchase IS NULL THEN 1 ELSE 0 END,
         last_purchase DESC, c.name COLLATE NOCASE''');
   }
@@ -864,15 +891,21 @@ class StoreDb {
           COALESCE(SUM(pi.quantity),0) total_quantity
         FROM purchases p JOIN purchase_items pi ON pi.purchase_id=p.id
         WHERE p.status='completed' GROUP BY LOWER(TRIM(p.supplier))
+      ), debt_stats AS (
+        SELECT party_id, COALESCE(SUM(amount_delta),0) debt_adjustment
+        FROM debt_adjustments WHERE party_type='supplier'
+        GROUP BY party_id
       )
       SELECT d.id, d.name supplier_name, d.phone, d.address, d.note,
         COALESCE(ps.purchase_count,0) purchase_count,
         COALESCE(qs.total_quantity,0) total_quantity,
         COALESCE(ps.total_purchase,0) total_purchase,
-        COALESCE(ps.debt,0) debt, ps.last_purchase
+        MAX(0, COALESCE(ps.debt,0)+COALESCE(ds.debt_adjustment,0)) debt,
+        ps.last_purchase
       FROM supplier_directory d
       LEFT JOIN purchase_stats ps ON ps.name_key=LOWER(TRIM(d.name))
       LEFT JOIN quantity_stats qs ON qs.name_key=LOWER(TRIM(d.name))
+      LEFT JOIN debt_stats ds ON ds.party_id=d.id
       ORDER BY CASE WHEN ps.last_purchase IS NULL THEN 1 ELSE 0 END,
         ps.last_purchase DESC, d.name COLLATE NOCASE''');
   }
@@ -887,6 +920,39 @@ class StoreDb {
       LEFT JOIN products pr ON pr.id=pi.product_id
       WHERE LOWER(TRIM(p.supplier))=LOWER(?)
       GROUP BY p.id ORDER BY p.created_at DESC''', [name.trim()]);
+  }
+
+  Future<List<Map<String, Object?>>> debtAdjustments(
+      String partyType, int partyId) async {
+    final db = await database;
+    return db.query('debt_adjustments',
+        where: 'party_type=? AND party_id=?',
+        whereArgs: [partyType, partyId], orderBy: 'created_at DESC, id DESC');
+  }
+
+  Future<void> addDebtAdjustment({
+    required String partyType,
+    required int partyId,
+    required int amount,
+    required bool increase,
+    required int currentDebt,
+    required String note,
+  }) async {
+    if (partyType != 'customer' && partyType != 'supplier') {
+      throw Exception('Loại công nợ không hợp lệ');
+    }
+    if (amount <= 0) throw Exception('Số tiền phải lớn hơn 0');
+    if (!increase && amount > currentDebt) {
+      throw Exception('Số tiền giảm không được lớn hơn công nợ hiện tại');
+    }
+    final db = await database;
+    await db.insert('debt_adjustments', {
+      'party_type': partyType,
+      'party_id': partyId,
+      'amount_delta': increase ? amount : -amount,
+      'note': note.trim(),
+      'created_at': DateTime.now().toIso8601String(),
+    });
   }
 
   Future<List<Map<String, Object?>>> repairs() async {
@@ -1054,11 +1120,11 @@ class StoreDb {
       'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
       'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
       'cash_entries', 'stocktakes', 'customer_directory',
-      'supplier_directory', 'app_settings'
+      'supplier_directory', 'debt_adjustments', 'app_settings'
     ];
     final data = <String, Object?>{
       'app': 'MinhCanhMobileV3',
-      'backup_version': 3,
+      'backup_version': 4,
       'created_at': DateTime.now().toIso8601String(),
     };
     for (final table in tables) {
@@ -1073,7 +1139,7 @@ class StoreDb {
       throw Exception('Nội dung sao lưu không đúng của Minh Cảnh Mobile V3');
     }
     const deleteOrder = [
-      'warranty_claims', 'stocktakes', 'cash_entries', 'repairs',
+      'warranty_claims', 'stocktakes', 'cash_entries', 'debt_adjustments', 'repairs',
       'inventory_movements', 'sale_items', 'sales', 'purchase_items',
       'serial_units', 'purchases', 'products', 'customer_directory',
       'supplier_directory', 'app_settings'
@@ -1082,7 +1148,7 @@ class StoreDb {
       'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
       'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
       'cash_entries', 'stocktakes', 'customer_directory',
-      'supplier_directory', 'app_settings'
+      'supplier_directory', 'debt_adjustments', 'app_settings'
     ];
     final db = await database;
     await db.execute('PRAGMA foreign_keys = OFF');
@@ -1230,6 +1296,9 @@ class StoreDb {
       COALESCE(SUM(CASE WHEN entry_type='income' THEN amount ELSE 0 END),0) income,
       COALESCE(SUM(CASE WHEN entry_type='expense' THEN amount ELSE 0 END),0) expense
       FROM cash_entries''');
+    final debtAdjustmentRows = await db.rawQuery('''SELECT
+      COALESCE(SUM(amount_delta),0) amount
+      FROM debt_adjustments WHERE party_type='customer' ''');
     final stockRows = await db.rawQuery('''SELECT
       COALESCE((SELECT SUM(quantity*avg_cost) FROM products WHERE track_imei=0),0) +
       COALESCE((SELECT SUM(cost) FROM serial_units WHERE status='in_stock'),0) stock_value''');
@@ -1240,7 +1309,8 @@ class StoreDb {
     return {
       'revenue': n(sale, 'revenue') + n(repair, 'revenue'),
       'profit': n(sale, 'profit') + n(repair, 'profit'),
-      'debt': n(sale, 'debt') + n(repair, 'debt'),
+      'debt': n(sale, 'debt') + n(repair, 'debt')
+          + n(debtAdjustmentRows.single, 'amount'),
       'fund': n(sale, 'fund') + n(repair, 'fund') + n(cash, 'income') - n(cash, 'expense'),
       'invoices': n(sale, 'invoices'),
       'pending_repairs': n(repair, 'pending'),
@@ -1947,6 +2017,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
   Map<String, Object?>? product;
   int quantity = 1;
   final cost = TextEditingController();
+  final discount = TextEditingController(text: '0');
   final supplier = TextEditingController();
   final paid = TextEditingController();
   String payment = 'Tiền mặt';
@@ -1962,6 +2033,47 @@ class _PurchaseFormState extends State<PurchaseForm> {
     _syncSerials();
     _loadSuppliers();
   }
+
+  @override
+  void dispose() {
+    cost.dispose();
+    discount.dispose();
+    supplier.dispose();
+    paid.dispose();
+    super.dispose();
+  }
+
+  int get unitPrice => int.tryParse(cost.text) ?? 0;
+  int get discountPerItem => int.tryParse(discount.text) ?? 0;
+  int get netUnitCost => unitPrice >= discountPerItem
+      ? unitPrice - discountPerItem : 0;
+  int get purchaseTotal => quantity * netUnitCost;
+  int get remainingToPay {
+    final value = purchaseTotal - (int.tryParse(paid.text) ?? 0);
+    return value < 0 ? 0 : value;
+  }
+
+  Widget _summaryRow(String label, String value, {bool strong = false}) =>
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(children: [
+          Expanded(child: Text(label,
+              style: TextStyle(fontWeight:
+                  strong ? FontWeight.bold : FontWeight.w500))),
+          Container(
+            constraints: const BoxConstraints(minWidth: 135),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+            decoration: BoxDecoration(
+              color: strong ? const Color(0xFFE8ECF2) : Colors.white,
+              border: Border.all(color: Colors.black12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(value, textAlign: TextAlign.right,
+                style: TextStyle(fontSize: 16,
+                    fontWeight: strong ? FontWeight.bold : FontWeight.w500)),
+          ),
+        ]),
+      );
 
   Future<void> _loadSuppliers({int? selectId}) async {
     final rows = await StoreDb.instance.supplierDirectory();
@@ -2038,22 +2150,47 @@ class _PurchaseFormState extends State<PurchaseForm> {
         ),
         const SizedBox(height: 12),
         if (product?['track_imei'] == 1)
-          Card(child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(children: [
-              const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Số lượng máy nhập', style: TextStyle(fontWeight: FontWeight.bold)),
-                Text('Mỗi máy tương ứng với một IMEI', style: TextStyle(fontSize: 12)),
-              ])),
-              Text('${serials.length}', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-            ]),
-          ))
+          Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            const Text('Danh sách IMEI',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const Text('Mỗi IMEI tương ứng với một máy nhập.'),
+            const SizedBox(height: 8),
+            ...List.generate(serials.length, (i) => SerialEditor(
+                index: i, draft: serials[i], onRemove: () => _removeSerial(i),
+                canRemove: serials.length > 1)),
+            OutlinedButton.icon(
+              onPressed: _addSerial,
+              icon: const Icon(Icons.add),
+              label: const Text('Thêm Serial / IMEI'),
+            ),
+          ])
         else
           TextFormField(initialValue: '$quantity', keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               decoration: const InputDecoration(labelText: 'Số lượng *'),
               onChanged: (v) => setState(() => quantity = int.tryParse(v) ?? 0)),
         const SizedBox(height: 12),
-        TextField(controller: cost, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Đơn giá nhập chung')),
+        TextField(controller: cost, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(labelText: 'Đơn giá nhập *'),
+            onChanged: (_) => setState(() {})),
+        const SizedBox(height: 12),
+        TextField(controller: discount, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(
+                labelText: 'Giảm giá trên mỗi sản phẩm'),
+            onChanged: (_) => setState(() {})),
+        const SizedBox(height: 12),
+        Card(color: const Color(0xFFF5F7FA), child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(children: [
+            _summaryRow('Số lượng nhập', '$quantity', strong: true),
+            _summaryRow('Đơn giá', vnd(unitPrice)),
+            _summaryRow('Giảm giá', vnd(discountPerItem)),
+            _summaryRow('Giá nhập', vnd(netUnitCost), strong: true),
+            _summaryRow('Thành tiền', vnd(purchaseTotal), strong: true),
+          ]),
+        )),
         const SizedBox(height: 12),
         DropdownButtonFormField<int>(
           key: ValueKey('supplier-$selectedSupplierId-${suppliers.length}'),
@@ -2073,23 +2210,13 @@ class _PurchaseFormState extends State<PurchaseForm> {
           onChanged: _pickSupplier,
         ),
         const SizedBox(height: 12),
-        TextField(controller: paid, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Đã thanh toán')),
+        TextField(controller: paid, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(labelText: 'Đã thanh toán',
+                helperText: 'Còn phải trả: ${vnd(remainingToPay)}'),
+            onChanged: (_) => setState(() {})),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(initialValue: payment, decoration: const InputDecoration(labelText: 'Phương thức'), items: ['Tiền mặt','Chuyển khoản','Ghi nợ nhà cung cấp'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(), onChanged: (v) => setState(() => payment = v!)),
-        if (product?['track_imei'] == 1) ...[
-          const SizedBox(height: 20),
-          const Text('Danh sách IMEI', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const Text('Bấm “Thêm IMEI” để nhập nhiều máy cùng một mẫu hàng.'),
-          const SizedBox(height: 8),
-          ...List.generate(serials.length, (i) => SerialEditor(
-              index: i, draft: serials[i], onRemove: () => _removeSerial(i),
-              canRemove: serials.length > 1)),
-          OutlinedButton.icon(
-            onPressed: _addSerial,
-            icon: const Icon(Icons.add),
-            label: const Text('Thêm IMEI / thêm máy'),
-          ),
-        ],
         const SizedBox(height: 20),
         FilledButton.icon(onPressed: saving ? null : save, icon: const Icon(Icons.check), label: const Text('Hoàn thành phiếu nhập')),
       ]);
@@ -2100,12 +2227,21 @@ class _PurchaseFormState extends State<PurchaseForm> {
     if (product == null) return showError(context, 'Hãy chọn mẫu hàng');
     if (product!['track_imei'] == 1) quantity = serials.length;
     if (quantity <= 0) return showError(context, 'Số lượng phải lớn hơn 0');
-    if (product!['track_imei'] == 1 && serials.any((s) => s.imei.trim().isEmpty || s.cost < 0)) return showError(context, 'Nhập đủ IMEI và giá vốn');
+    if (unitPrice <= 0) return showError(context, 'Đơn giá nhập phải lớn hơn 0');
+    if (discountPerItem < 0 || discountPerItem > unitPrice) {
+      return showError(context, 'Giảm giá không được lớn hơn đơn giá');
+    }
+    if (product!['track_imei'] == 1 &&
+        serials.any((s) => s.imei.trim().isEmpty)) {
+      return showError(context, 'Hãy nhập đủ IMEI');
+    }
     setState(() => saving = true);
     try {
-      final commonCost = int.tryParse(cost.text) ?? 0;
-      for (final s in serials) { if (s.cost == 0) s.cost = commonCost; }
-      await StoreDb.instance.completePurchase(productId: product!['id'] as int, quantity: quantity, unitCost: commonCost, supplier: supplier.text, paid: int.tryParse(paid.text) ?? 0, paymentMethod: payment, serials: serials);
+      for (final s in serials) { s.cost = netUnitCost; }
+      await StoreDb.instance.completePurchase(productId: product!['id'] as int,
+          quantity: quantity, unitCost: netUnitCost, supplier: supplier.text,
+          paid: int.tryParse(paid.text) ?? 0, paymentMethod: payment,
+          serials: serials);
       if (mounted) Navigator.pop(context, true);
     } catch (e) { showError(context, e); setState(() => saving = false); }
   }
@@ -2134,8 +2270,6 @@ class SerialEditor extends StatelessWidget {
       TextFormField(initialValue: draft.imei, decoration: const InputDecoration(labelText: 'IMEI *'), onChanged: (v) => draft.imei = v),
       const SizedBox(height: 8),
       TextFormField(initialValue: draft.color, decoration: const InputDecoration(labelText: 'Màu sắc'), onChanged: (v) => draft.color = v),
-      const SizedBox(height: 8),
-      TextFormField(initialValue: draft.cost == 0 ? '' : '${draft.cost}', keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Giá vốn riêng'), onChanged: (v) => draft.cost = int.tryParse(v) ?? 0),
     ])),
   );
 }
@@ -2995,6 +3129,98 @@ class _SupplierFormPageState extends State<SupplierFormPage> {
   }
 }
 
+class DebtAdjustmentPage extends StatefulWidget {
+  const DebtAdjustmentPage({super.key, required this.partyType,
+      required this.partyId, required this.partyName,
+      required this.currentDebt});
+  final String partyType;
+  final int partyId;
+  final String partyName;
+  final int currentDebt;
+
+  @override
+  State<DebtAdjustmentPage> createState() => _DebtAdjustmentPageState();
+}
+
+class _DebtAdjustmentPageState extends State<DebtAdjustmentPage> {
+  final amount = TextEditingController();
+  final note = TextEditingController();
+  bool increase = false;
+  bool saving = false;
+
+  int get amountValue => int.tryParse(amount.text) ?? 0;
+  int get newDebt {
+    final value = widget.currentDebt + (increase ? amountValue : -amountValue);
+    return value < 0 ? 0 : value;
+  }
+
+  @override
+  void dispose() {
+    amount.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Điều chỉnh công nợ')),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(widget.partyName,
+                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            infoLine('Công nợ hiện tại', vnd(widget.currentDebt)),
+          ],
+        ))),
+        const SizedBox(height: 16),
+        SegmentedButton<bool>(
+          segments: [
+            ButtonSegment(value: false, icon: const Icon(Icons.payments),
+                label: const Text('Giảm nợ / đã trả')),
+            const ButtonSegment(value: true, icon: Icon(Icons.add_card),
+                label: Text('Tăng công nợ')),
+          ],
+          selected: {increase},
+          onSelectionChanged: (value) => setState(() => increase = value.first),
+        ),
+        const SizedBox(height: 16),
+        TextField(controller: amount, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(labelText: 'Số tiền *'),
+            onChanged: (_) => setState(() {})),
+        const SizedBox(height: 12),
+        TextField(controller: note, maxLines: 3,
+            decoration: InputDecoration(labelText: increase
+                ? 'Lý do tăng nợ' : 'Ghi chú thanh toán / giảm nợ')),
+        const SizedBox(height: 16),
+        Card(color: const Color(0xFFF5F7FA), child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: infoLine('Công nợ sau điều chỉnh', vnd(newDebt)),
+        )),
+        const SizedBox(height: 20),
+        FilledButton.icon(onPressed: saving ? null : save,
+            icon: const Icon(Icons.save), label: const Text('Lưu điều chỉnh')),
+      ]),
+    );
+  }
+
+  Future<void> save() async {
+    setState(() => saving = true);
+    try {
+      await StoreDb.instance.addDebtAdjustment(
+        partyType: widget.partyType, partyId: widget.partyId,
+        amount: amountValue, increase: increase,
+        currentDebt: widget.currentDebt, note: note.text,
+      );
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) { showError(context, e); setState(() => saving = false); }
+    }
+  }
+}
+
 class CustomersPage extends StatefulWidget {
   const CustomersPage({super.key});
   @override
@@ -3119,11 +3345,13 @@ class _CustomerDetailPageState extends State<CustomerDetailPage> {
       future: Future.wait<Object?>([
         StoreDb.instance.customerSales('${customer['customer']}', '${customer['phone']}'),
         StoreDb.instance.customerRepairs('${customer['customer']}', '${customer['phone']}'),
+        StoreDb.instance.debtAdjustments('customer', customer['id'] as int),
       ]),
       builder: (context, snap) {
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
         final sales = snap.data![0] as List<Map<String, Object?>>;
         final repairs = snap.data![1] as List<Map<String, Object?>>;
+        final adjustments = snap.data![2] as List<Map<String, Object?>>;
         return ListView(padding: const EdgeInsets.all(16), children: [
           Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
             crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -3139,9 +3367,37 @@ class _CustomerDetailPageState extends State<CustomerDetailPage> {
               infoLine('Lần gần nhất', formatDateTime(customer['last_purchase'])),
               if ('${customer['note']}'.trim().isNotEmpty)
                 infoLine('Ghi chú tri ân', '${customer['note']}'),
+              const SizedBox(height: 10),
+              SizedBox(width: double.infinity, child: FilledButton.icon(
+                onPressed: adjustDebt, icon: const Icon(Icons.account_balance_wallet),
+                label: const Text('Điều chỉnh công nợ'),
+              )),
             ],
           ))),
           const SizedBox(height: 16),
+          Text('Lịch sử công nợ (${adjustments.length})',
+              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (adjustments.isEmpty)
+            const Card(child: Padding(padding: EdgeInsets.all(16),
+                child: Text('Chưa có lần điều chỉnh công nợ.'))),
+          ...adjustments.map((entry) {
+            final delta = (entry['amount_delta'] as num).toInt();
+            return Padding(padding: const EdgeInsets.only(bottom: 8),
+              child: Card(child: ListTile(
+                leading: CircleAvatar(child: Icon(delta > 0
+                    ? Icons.add_card : Icons.payments)),
+                title: Text(delta > 0
+                    ? 'Tăng nợ ${vnd(delta)}'
+                    : 'Giảm nợ ${vnd(-delta)}',
+                    style: TextStyle(fontWeight: FontWeight.bold,
+                        color: delta > 0 ? Colors.orange : Colors.green)),
+                subtitle: Text('${formatDateTime(entry['created_at'])}'
+                    '${'${entry['note']}'.trim().isEmpty ? '' : '\n${entry['note']}'}'),
+                isThreeLine: '${entry['note']}'.trim().isNotEmpty,
+              )));
+          }),
+          const SizedBox(height: 10),
           Text('Lịch sử mua hàng (${sales.length})',
               style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
@@ -3194,6 +3450,19 @@ class _CustomerDetailPageState extends State<CustomerDetailPage> {
     if (changed == null) return;
     final rows = await StoreDb.instance.customers();
     final fresh = rows.where((row) => row['id'] == changed['id']);
+    if (fresh.isNotEmpty && mounted) setState(() => customer = fresh.first);
+  }
+
+  Future<void> adjustDebt() async {
+    final changed = await Navigator.push<bool>(context, MaterialPageRoute(
+      builder: (_) => DebtAdjustmentPage(
+        partyType: 'customer', partyId: customer['id'] as int,
+        partyName: '${customer['customer']}', currentDebt: n('debt'),
+      ),
+    ));
+    if (changed != true) return;
+    final rows = await StoreDb.instance.customers();
+    final fresh = rows.where((row) => row['id'] == customer['id']);
     if (fresh.isNotEmpty && mounted) setState(() => customer = fresh.first);
   }
 }
@@ -3289,11 +3558,15 @@ class _SupplierDetailPageState extends State<SupplierDetailPage> {
       IconButton(onPressed: edit, icon: const Icon(Icons.edit_outlined),
           tooltip: 'Sửa nhà cung cấp'),
     ]),
-    body: FutureBuilder<List<Map<String, Object?>>>(
-      future: StoreDb.instance.supplierPurchases('${supplier['supplier_name']}'),
+    body: FutureBuilder<List<Object?>>(
+      future: Future.wait<Object?>([
+        StoreDb.instance.supplierPurchases('${supplier['supplier_name']}'),
+        StoreDb.instance.debtAdjustments('supplier', supplier['id'] as int),
+      ]),
       builder: (context, snap) {
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-        final rows = snap.data!;
+        final rows = snap.data![0] as List<Map<String, Object?>>;
+        final adjustments = snap.data![1] as List<Map<String, Object?>>;
         return ListView(padding: const EdgeInsets.all(16), children: [
           Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
             crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -3308,9 +3581,37 @@ class _SupplierDetailPageState extends State<SupplierDetailPage> {
               infoLine('Lần gần nhất', formatDateTime(supplier['last_purchase'])),
               if ('${supplier['note']}'.trim().isNotEmpty)
                 infoLine('Ghi chú', '${supplier['note']}'),
+              const SizedBox(height: 10),
+              SizedBox(width: double.infinity, child: FilledButton.icon(
+                onPressed: adjustDebt, icon: const Icon(Icons.account_balance_wallet),
+                label: const Text('Điều chỉnh công nợ'),
+              )),
             ],
           ))),
           const SizedBox(height: 16),
+          Text('Lịch sử công nợ (${adjustments.length})',
+              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (adjustments.isEmpty)
+            const Card(child: Padding(padding: EdgeInsets.all(16),
+                child: Text('Chưa có lần điều chỉnh công nợ.'))),
+          ...adjustments.map((entry) {
+            final delta = (entry['amount_delta'] as num).toInt();
+            return Padding(padding: const EdgeInsets.only(bottom: 8),
+              child: Card(child: ListTile(
+                leading: CircleAvatar(child: Icon(delta > 0
+                    ? Icons.add_card : Icons.payments)),
+                title: Text(delta > 0
+                    ? 'Tăng nợ ${vnd(delta)}'
+                    : 'Đã trả / giảm nợ ${vnd(-delta)}',
+                    style: TextStyle(fontWeight: FontWeight.bold,
+                        color: delta > 0 ? Colors.orange : Colors.green)),
+                subtitle: Text('${formatDateTime(entry['created_at'])}'
+                    '${'${entry['note']}'.trim().isEmpty ? '' : '\n${entry['note']}'}'),
+                isThreeLine: '${entry['note']}'.trim().isNotEmpty,
+              )));
+          }),
+          const SizedBox(height: 10),
           Text('Lịch sử nhập hàng (${rows.length})',
               style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
@@ -3347,6 +3648,19 @@ class _SupplierDetailPageState extends State<SupplierDetailPage> {
     if (changed == null) return;
     final rows = await StoreDb.instance.suppliers();
     final fresh = rows.where((row) => row['id'] == changed['id']);
+    if (fresh.isNotEmpty && mounted) setState(() => supplier = fresh.first);
+  }
+
+  Future<void> adjustDebt() async {
+    final changed = await Navigator.push<bool>(context, MaterialPageRoute(
+      builder: (_) => DebtAdjustmentPage(
+        partyType: 'supplier', partyId: supplier['id'] as int,
+        partyName: '${supplier['supplier_name']}', currentDebt: n('debt'),
+      ),
+    ));
+    if (changed != true) return;
+    final rows = await StoreDb.instance.suppliers();
+    final fresh = rows.where((row) => row['id'] == supplier['id']);
     if (fresh.isNotEmpty && mounted) setState(() => supplier = fresh.first);
   }
 }
