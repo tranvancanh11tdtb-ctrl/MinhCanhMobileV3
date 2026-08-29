@@ -51,7 +51,7 @@ class MinhCanhApp extends StatelessWidget {
             fillColor: Colors.white,
           ),
         ),
-        home: const PinGate(),
+        home: const HomeShell(),
       );
 }
 
@@ -64,7 +64,7 @@ class StoreDb {
 
   Future<Database> _open() async {
     final file = p.join(await getDatabasesPath(), 'minh_canh_mobile_v3.db');
-    return openDatabase(file, version: 6, onConfigure: (db) async {
+    return openDatabase(file, version: 7, onConfigure: (db) async {
       await db.execute('PRAGMA foreign_keys = ON');
     }, onCreate: (db, version) async {
       await db.execute('''CREATE TABLE products(
@@ -153,12 +153,14 @@ class StoreDb {
       await _createV4Tables(db);
       await _createV5Tables(db);
       await _createV6Tables(db);
+      await _createV7Tables(db);
     }, onUpgrade: (db, oldVersion, newVersion) async {
       if (oldVersion < 2) await _createV2Tables(db);
       if (oldVersion < 3) await _createV3Tables(db);
       if (oldVersion < 4) await _createV4Tables(db);
       if (oldVersion < 5) await _createV5Tables(db);
       if (oldVersion < 6) await _createV6Tables(db);
+      if (oldVersion < 7) await _createV7Tables(db);
     });
   }
 
@@ -292,6 +294,40 @@ class StoreDb {
       WHERE LENGTH(TRIM(category))>0''', [now]);
   }
 
+  Future<void> _createV7Tables(DatabaseExecutor db) async {
+    final categoryColumns = await db.rawQuery(
+        'PRAGMA table_info(product_categories)');
+    if (!categoryColumns.any((column) => column['name'] == 'parent_id')) {
+      await db.execute(
+          'ALTER TABLE product_categories ADD COLUMN parent_id INTEGER');
+    }
+    await db.execute('''CREATE INDEX IF NOT EXISTS idx_product_category_parent
+      ON product_categories(parent_id, name)''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS product_brands(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      created_at TEXT NOT NULL
+    )''');
+    final now = DateTime.now().toIso8601String();
+    for (final name in const [
+      'Apple',
+      'Samsung',
+      'Xiaomi',
+      'OPPO',
+      'realme',
+      'Vivo',
+    ]) {
+      await db.insert(
+        'product_brands',
+        {'name': name, 'created_at': now},
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    }
+    await db.rawInsert('''INSERT OR IGNORE INTO product_brands(name, created_at)
+      SELECT DISTINCT TRIM(brand), ? FROM products
+      WHERE LENGTH(TRIM(brand))>0''', [now]);
+  }
+
   Future<void> _backfillDirectories(DatabaseExecutor db) async {
     await db.rawInsert('''INSERT OR IGNORE INTO customer_directory
       (name, phone, note, created_at, updated_at)
@@ -313,21 +349,38 @@ class StoreDb {
 
   Future<List<Map<String, Object?>>> productCategories() async {
     final db = await database;
-    return db.rawQuery('''SELECT c.*,
+    return db.rawQuery('''SELECT c.*, parent.name parent_name,
+      CASE WHEN parent.id IS NULL THEN c.name
+           ELSE parent.name || ' → ' || c.name END display_name,
       (SELECT COUNT(*) FROM products p
        WHERE LOWER(TRIM(p.category))=LOWER(TRIM(c.name)) AND p.active>=0)
        product_count
       FROM product_categories c
-      ORDER BY c.name COLLATE NOCASE''');
+      LEFT JOIN product_categories parent ON parent.id=c.parent_id
+      ORDER BY COALESCE(parent.name, c.name) COLLATE NOCASE,
+               CASE WHEN parent.id IS NULL THEN 0 ELSE 1 END,
+               c.name COLLATE NOCASE''');
   }
 
-  Future<String> addProductCategory(String rawName) async {
+  Future<String> addProductCategory(String rawName, {int? parentId}) async {
     final name = rawName.trim();
     if (name.isEmpty) throw Exception('Tên phân loại không được để trống');
     final db = await database;
+    if (parentId != null) {
+      final parent = await db.query('product_categories',
+          columns: ['id', 'parent_id'], where: 'id=?', whereArgs: [parentId]);
+      if (parent.isEmpty) throw Exception('Không tìm thấy nhóm cha');
+      if (parent.single['parent_id'] != null) {
+        throw Exception('Chỉ hỗ trợ phân loại tối đa 2 cấp');
+      }
+    }
     await db.insert(
       'product_categories',
-      {'name': name, 'created_at': DateTime.now().toIso8601String()},
+      {
+        'name': name,
+        'parent_id': parentId,
+        'created_at': DateTime.now().toIso8601String(),
+      },
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );
     final rows = await db.query('product_categories',
@@ -359,6 +412,14 @@ class StoreDb {
           columns: ['name'], where: 'id=?', whereArgs: [id]);
       if (rows.isEmpty) throw Exception('Không tìm thấy phân loại');
       final name = '${rows.single['name']}';
+      final children = Sqflite.firstIntValue(await txn.rawQuery(
+            'SELECT COUNT(*) FROM product_categories WHERE parent_id=?',
+            [id],
+          )) ??
+          0;
+      if (children > 0) {
+        throw Exception('Nhóm đang có $children phân loại con nên chưa thể xóa');
+      }
       final used = Sqflite.firstIntValue(await txn.rawQuery(
             '''SELECT COUNT(*) FROM products
                WHERE active>=0 AND LOWER(TRIM(category))=LOWER(TRIM(?))''',
@@ -369,6 +430,67 @@ class StoreDb {
         throw Exception('Phân loại đang có $used hàng hóa nên chưa thể xóa');
       }
       await txn.delete('product_categories', where: 'id=?', whereArgs: [id]);
+    });
+  }
+
+  Future<List<Map<String, Object?>>> productBrands() async {
+    final db = await database;
+    return db.rawQuery('''SELECT b.*,
+      (SELECT COUNT(*) FROM products p
+       WHERE LOWER(TRIM(p.brand))=LOWER(TRIM(b.name)) AND p.active>=0)
+       product_count
+      FROM product_brands b
+      ORDER BY b.name COLLATE NOCASE''');
+  }
+
+  Future<String> addProductBrand(String rawName) async {
+    final name = rawName.trim();
+    if (name.isEmpty) throw Exception('Tên hãng không được để trống');
+    final db = await database;
+    await db.insert(
+      'product_brands',
+      {'name': name, 'created_at': DateTime.now().toIso8601String()},
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+    final rows = await db.query('product_brands',
+        columns: ['name'], where: 'LOWER(name)=LOWER(?)', whereArgs: [name]);
+    return '${rows.single['name']}';
+  }
+
+  Future<void> renameProductBrand(int id, String rawName) async {
+    final name = rawName.trim();
+    if (name.isEmpty) throw Exception('Tên hãng không được để trống');
+    final db = await database;
+    await db.transaction((txn) async {
+      final rows = await txn.query('product_brands',
+          columns: ['name'], where: 'id=?', whereArgs: [id]);
+      if (rows.isEmpty) throw Exception('Không tìm thấy hãng');
+      final oldName = '${rows.single['name']}';
+      await txn.update('product_brands', {'name': name},
+          where: 'id=?', whereArgs: [id]);
+      await txn.update('products', {'brand': name},
+          where: 'LOWER(TRIM(brand))=LOWER(TRIM(?))',
+          whereArgs: [oldName]);
+    });
+  }
+
+  Future<void> deleteProductBrand(int id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final rows = await txn.query('product_brands',
+          columns: ['name'], where: 'id=?', whereArgs: [id]);
+      if (rows.isEmpty) throw Exception('Không tìm thấy hãng');
+      final name = '${rows.single['name']}';
+      final used = Sqflite.firstIntValue(await txn.rawQuery(
+            '''SELECT COUNT(*) FROM products
+               WHERE active>=0 AND LOWER(TRIM(brand))=LOWER(TRIM(?))''',
+            [name],
+          )) ??
+          0;
+      if (used > 0) {
+        throw Exception('Hãng đang có $used hàng hóa nên chưa thể xóa');
+      }
+      await txn.delete('product_brands', where: 'id=?', whereArgs: [id]);
     });
   }
 
@@ -667,6 +789,154 @@ class StoreDb {
           'reference_id': purchaseId,
           'created_at': now,
         });
+      }
+      return purchaseId;
+    });
+  }
+
+  Future<int> completeMultiPurchase({
+    required List<PurchaseLineDraft> items,
+    required String supplier,
+    required int paid,
+    required String paymentMethod,
+  }) async {
+    if (items.isEmpty) throw Exception('Hãy thêm ít nhất một sản phẩm');
+    final db = await database;
+    return db.transaction((txn) async {
+      final prepared = <Map<String, Object?>>[];
+      final allImeis = <String>[];
+      final productIds = <int>{};
+      var purchaseTotal = 0;
+
+      for (final item in items) {
+        final productId = item.product['id'] as int;
+        if (!productIds.add(productId)) {
+          throw Exception('${item.product['name']} đang có hai dòng nhập');
+        }
+        final rows = await txn.query('products',
+            where: 'id=? AND active=1', whereArgs: [productId]);
+        if (rows.isEmpty) {
+          throw Exception('${item.product['name']} không còn kinh doanh');
+        }
+        final product = rows.single;
+        final tracks = product['track_imei'] == 1;
+        final quantity = tracks ? item.serials.length : item.quantity;
+        if (quantity <= 0) {
+          throw Exception('Số lượng ${product['name']} phải lớn hơn 0');
+        }
+        if (item.unitPrice <= 0) {
+          throw Exception('Đơn giá ${product['name']} phải lớn hơn 0');
+        }
+        if (item.discountPerItem < 0 ||
+            item.discountPerItem > item.unitPrice) {
+          throw Exception('Giảm giá ${product['name']} không hợp lệ');
+        }
+        if (tracks) {
+          final imeis = item.serials
+              .map((serial) => serial.imei.trim())
+              .toList();
+          if (imeis.any((imei) => !isValidImei(imei))) {
+            throw Exception(
+                'IMEI của ${product['name']} phải đủ 15 số và đúng mã kiểm tra');
+          }
+          allImeis.addAll(imeis);
+        }
+        final lineTotal = quantity * item.netUnitCost;
+        purchaseTotal += lineTotal;
+        prepared.add({
+          'draft': item,
+          'product': product,
+          'product_id': productId,
+          'tracks': tracks,
+          'quantity': quantity,
+          'unit_cost': item.netUnitCost,
+        });
+      }
+
+      if (allImeis.toSet().length != allImeis.length) {
+        throw Exception('Phiếu nhập đang có IMEI trùng nhau');
+      }
+      if (allImeis.isNotEmpty) {
+        final placeholders = List.filled(allImeis.length, '?').join(',');
+        final existed = await txn.rawQuery(
+          'SELECT imei FROM serial_units WHERE imei IN ($placeholders)',
+          allImeis,
+        );
+        if (existed.isNotEmpty) {
+          throw Exception('IMEI ${existed.first['imei']} đã có trong kho/lịch sử');
+        }
+      }
+      if (paid < 0 || paid > purchaseTotal) {
+        throw Exception('Số tiền đã thanh toán không hợp lệ');
+      }
+
+      final now = DateTime.now().toIso8601String();
+      final code = 'PN${DateTime.now().millisecondsSinceEpoch}';
+      await _ensureSupplier(txn, supplier);
+      final purchaseId = await txn.insert('purchases', {
+        'code': code,
+        'supplier': supplier.trim(),
+        'total': purchaseTotal,
+        'paid': paid,
+        'payment_method': paymentMethod,
+        'created_at': now,
+      });
+
+      for (final row in prepared) {
+        final item = row['draft'] as PurchaseLineDraft;
+        final product = row['product'] as Map<String, Object?>;
+        final productId = row['product_id'] as int;
+        final tracks = row['tracks'] as bool;
+        final quantity = row['quantity'] as int;
+        final unitCost = row['unit_cost'] as int;
+
+        await txn.insert('purchase_items', {
+          'purchase_id': purchaseId,
+          'product_id': productId,
+          'quantity': quantity,
+          'unit_cost': unitCost,
+        });
+        if (tracks) {
+          for (final serial in item.serials) {
+            final serialId = await txn.insert('serial_units', {
+              'product_id': productId,
+              'imei': serial.imei.trim(),
+              'color': serial.color.trim(),
+              'condition_text': serial.conditionText.trim().isEmpty
+                  ? 'Mới'
+                  : serial.conditionText.trim(),
+              'cost': unitCost,
+              'purchase_id': purchaseId,
+              'created_at': now,
+            });
+            await txn.insert('inventory_movements', {
+              'product_id': productId,
+              'serial_id': serialId,
+              'kind': 'purchase',
+              'quantity_delta': 1,
+              'reference_type': 'purchase',
+              'reference_id': purchaseId,
+              'created_at': now,
+            });
+          }
+        } else {
+          final oldQty = product['quantity'] as int;
+          final oldCost = product['avg_cost'] as int;
+          final newQty = oldQty + quantity;
+          final newCost = ((oldQty * oldCost + quantity * unitCost) / newQty)
+              .round();
+          await txn.update(
+              'products', {'quantity': newQty, 'avg_cost': newCost},
+              where: 'id=?', whereArgs: [productId]);
+          await txn.insert('inventory_movements', {
+            'product_id': productId,
+            'kind': 'purchase',
+            'quantity_delta': quantity,
+            'reference_type': 'purchase',
+            'reference_id': purchaseId,
+            'created_at': now,
+          });
+        }
       }
       return purchaseId;
     });
@@ -1512,11 +1782,11 @@ class StoreDb {
       'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
       'cash_entries', 'stocktakes', 'customer_directory',
       'supplier_directory', 'debt_adjustments', 'product_categories',
-      'app_settings'
+      'product_brands', 'app_settings'
     ];
     final data = <String, Object?>{
       'app': 'MinhCanhMobileV3',
-      'backup_version': 5,
+      'backup_version': 6,
       'created_at': DateTime.now().toIso8601String(),
     };
     for (final table in tables) {
@@ -1534,14 +1804,15 @@ class StoreDb {
       'warranty_claims', 'stocktakes', 'cash_entries', 'debt_adjustments', 'repairs',
       'inventory_movements', 'sale_items', 'sales', 'purchase_items',
       'serial_units', 'purchases', 'products', 'customer_directory',
-      'supplier_directory', 'product_categories', 'app_settings'
+      'supplier_directory', 'product_categories', 'product_brands',
+      'app_settings'
     ];
     const insertOrder = [
       'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
       'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
       'cash_entries', 'stocktakes', 'customer_directory',
       'supplier_directory', 'debt_adjustments', 'product_categories',
-      'app_settings'
+      'product_brands', 'app_settings'
     ];
     final db = await database;
     await db.execute('PRAGMA foreign_keys = OFF');
@@ -1562,6 +1833,7 @@ class StoreDb {
         }
         await _backfillDirectories(txn);
         await _createV6Tables(txn);
+        await _createV7Tables(txn);
       });
     } finally {
       await db.execute('PRAGMA foreign_keys = ON');
@@ -1785,6 +2057,47 @@ class SerialDraft {
   String color;
   String conditionText;
   int cost;
+}
+
+class PurchaseLineDraft {
+  PurchaseLineDraft({required this.product, int initialQuantity = 1})
+      : quantity = initialQuantity {
+    syncSerials();
+  }
+
+  final Map<String, Object?> product;
+  int quantity;
+  final cost = TextEditingController();
+  final discount = TextEditingController(text: '0');
+  final serials = <SerialDraft>[];
+
+  bool get tracksImei => product['track_imei'] == 1;
+  int get unitPrice => int.tryParse(cost.text) ?? 0;
+  int get discountPerItem => int.tryParse(discount.text) ?? 0;
+  int get netUnitCost => unitPrice >= discountPerItem
+      ? unitPrice - discountPerItem
+      : 0;
+  int get lineQuantity => tracksImei ? serials.length : quantity;
+  int get total => lineQuantity * netUnitCost;
+
+  void syncSerials() {
+    if (!tracksImei) {
+      serials.clear();
+      return;
+    }
+    if (quantity < 1) quantity = 1;
+    while (serials.length < quantity) {
+      serials.add(SerialDraft());
+    }
+    while (serials.length > quantity) {
+      serials.removeLast();
+    }
+  }
+
+  void dispose() {
+    cost.dispose();
+    discount.dispose();
+  }
 }
 
 class SaleLineDraft {
@@ -2335,6 +2648,8 @@ class _ProductFormState extends State<ProductForm> {
   final capacity = TextEditingController();
   final price = TextEditingController();
   List<String> categories = [];
+  Map<String, String> categoryLabels = {};
+  List<String> brands = [];
   String category = 'Điện thoại';
   bool imei = true;
   bool saving = false;
@@ -2359,12 +2674,20 @@ class _ProductFormState extends State<ProductForm> {
     final values = await Future.wait([
       StoreDb.instance.nextProductCode(),
       StoreDb.instance.productCategories(),
+      StoreDb.instance.productBrands(),
     ]);
     if (!mounted) return;
     final rows = values[1] as List<Map<String, Object?>>;
     setState(() {
       if (code.text.trim().isEmpty) code.text = values[0] as String;
       categories = rows.map((row) => '${row['name']}').toList();
+      categoryLabels = {
+        for (final row in rows)
+          '${row['name']}': '${row['display_name'] ?? row['name']}'
+      };
+      brands = (values[2] as List<Map<String, Object?>>)
+          .map((row) => '${row['name']}')
+          .toList();
       if (!categories.contains(category) && categories.isNotEmpty) {
         category = categories.first;
       }
@@ -2397,7 +2720,8 @@ class _ProductFormState extends State<ProductForm> {
             ),
             items: [
               ...categories.map((value) =>
-                  DropdownMenuItem(value: value, child: Text(value))),
+                  DropdownMenuItem(value: value,
+                      child: Text(categoryLabels[value] ?? value))),
               const DropdownMenuItem(
                 value: '__new__',
                 child: Text('+ Tạo phân loại mới'),
@@ -2406,7 +2730,19 @@ class _ProductFormState extends State<ProductForm> {
             onChanged: pickCategory,
           ),
           const SizedBox(height: 12),
-          TextFormField(controller: brand, decoration: const InputDecoration(labelText: 'Thương hiệu')),
+          DropdownButtonFormField<String>(
+            key: ValueKey('brand-${brand.text}-${brands.length}'),
+            initialValue: brands.contains(brand.text) ? brand.text : '',
+            decoration: const InputDecoration(labelText: 'Hãng'),
+            items: [
+              const DropdownMenuItem(value: '', child: Text('Không chọn hãng')),
+              ...brands.map((value) =>
+                  DropdownMenuItem(value: value, child: Text(value))),
+              const DropdownMenuItem(value: '__new__',
+                  child: Text('+ Tạo hãng mới')),
+            ],
+            onChanged: pickBrand,
+          ),
           const SizedBox(height: 12),
           TextFormField(controller: capacity, decoration: const InputDecoration(labelText: 'Dung lượng')),
           const SizedBox(height: 12),
@@ -2449,7 +2785,28 @@ class _ProductFormState extends State<ProductForm> {
     if (!mounted) return;
     setState(() {
       categories = rows.map((row) => '${row['name']}').toList();
+      categoryLabels = {
+        for (final row in rows)
+          '${row['name']}': '${row['display_name'] ?? row['name']}'
+      };
       category = saved;
+    });
+  }
+
+  Future<void> pickBrand(String? value) async {
+    if (value == null) return;
+    if (value != '__new__') {
+      setState(() => brand.text = value);
+      return;
+    }
+    final created = await promptNewBrand(context);
+    if (created == null || !mounted) return;
+    final saved = await StoreDb.instance.addProductBrand(created);
+    final rows = await StoreDb.instance.productBrands();
+    if (!mounted) return;
+    setState(() {
+      brands = rows.map((row) => '${row['name']}').toList();
+      brand.text = saved;
     });
   }
 
@@ -2795,6 +3152,8 @@ class _ProductEditFormState extends State<ProductEditForm> {
   late final TextEditingController name;
   late String category;
   List<String> categories = [];
+  Map<String, String> categoryLabels = {};
+  List<String> brands = [];
   late final TextEditingController brand;
   late final TextEditingController capacity;
   late final TextEditingController salePrice;
@@ -2831,12 +3190,26 @@ class _ProductEditFormState extends State<ProductEditForm> {
       value == null || value.trim().isEmpty ? 'Không được để trống' : null;
 
   Future<void> loadCategories() async {
-    final rows = await StoreDb.instance.productCategories();
+    final values = await Future.wait([
+      StoreDb.instance.productCategories(),
+      StoreDb.instance.productBrands(),
+    ]);
+    final rows = values[0] as List<Map<String, Object?>>;
     if (!mounted) return;
     setState(() {
       categories = rows.map((row) => '${row['name']}').toList();
+      categoryLabels = {
+        for (final row in rows)
+          '${row['name']}': '${row['display_name'] ?? row['name']}'
+      };
       if (!categories.contains(category)) categories.add(category);
       categories.sort();
+      brands = (values[1] as List<Map<String, Object?>>)
+          .map((row) => '${row['name']}')
+          .toList();
+      if (brand.text.trim().isNotEmpty && !brands.contains(brand.text)) {
+        brands.add(brand.text);
+      }
     });
   }
 
@@ -2851,6 +3224,19 @@ class _ProductEditFormState extends State<ProductEditForm> {
     final saved = await StoreDb.instance.addProductCategory(created);
     await loadCategories();
     if (mounted) setState(() => category = saved);
+  }
+
+  Future<void> pickBrand(String? value) async {
+    if (value == null) return;
+    if (value != '__new__') {
+      setState(() => brand.text = value);
+      return;
+    }
+    final created = await promptNewBrand(context);
+    if (created == null || !mounted) return;
+    final saved = await StoreDb.instance.addProductBrand(created);
+    await loadCategories();
+    if (mounted) setState(() => brand.text = saved);
   }
 
   @override
@@ -2873,15 +3259,27 @@ class _ProductEditFormState extends State<ProductEditForm> {
           decoration: const InputDecoration(labelText: 'Phân loại hàng hóa *'),
           items: [
             ...categories.map((value) =>
-                DropdownMenuItem(value: value, child: Text(value))),
+                DropdownMenuItem(value: value,
+                    child: Text(categoryLabels[value] ?? value))),
             const DropdownMenuItem(
                 value: '__new__', child: Text('+ Tạo phân loại mới')),
           ],
           onChanged: pickCategory,
         ),
         const SizedBox(height: 12),
-        TextFormField(controller: brand,
-            decoration: const InputDecoration(labelText: 'Thương hiệu')),
+        DropdownButtonFormField<String>(
+          key: ValueKey('edit-brand-${brand.text}-${brands.length}'),
+          initialValue: brands.contains(brand.text) ? brand.text : '',
+          decoration: const InputDecoration(labelText: 'Hãng'),
+          items: [
+            const DropdownMenuItem(value: '', child: Text('Không chọn hãng')),
+            ...brands.map((value) =>
+                DropdownMenuItem(value: value, child: Text(value))),
+            const DropdownMenuItem(value: '__new__',
+                child: Text('+ Tạo hãng mới')),
+          ],
+          onChanged: pickBrand,
+        ),
         const SizedBox(height: 12),
         TextFormField(controller: capacity,
             decoration: const InputDecoration(labelText: 'Dung lượng')),
@@ -3025,14 +3423,10 @@ class PurchaseForm extends StatefulWidget {
 }
 
 class _PurchaseFormState extends State<PurchaseForm> {
-  Map<String, Object?>? product;
-  int quantity = 1;
-  final cost = TextEditingController();
-  final discount = TextEditingController(text: '0');
+  final lines = <PurchaseLineDraft>[];
   final supplier = TextEditingController();
   final paid = TextEditingController();
   String payment = 'Tiền mặt';
-  final serials = <SerialDraft>[];
   List<Map<String, Object?>> suppliers = [];
   int selectedSupplierId = 0;
   bool saving = false;
@@ -3040,25 +3434,24 @@ class _PurchaseFormState extends State<PurchaseForm> {
   @override
   void initState() {
     super.initState();
-    product = widget.initialProduct;
-    _syncSerials();
+    if (widget.initialProduct != null) {
+      lines.add(PurchaseLineDraft(product: widget.initialProduct!));
+    }
     _loadSuppliers();
   }
 
   @override
   void dispose() {
-    cost.dispose();
-    discount.dispose();
+    for (final line in lines) {
+      line.dispose();
+    }
     supplier.dispose();
     paid.dispose();
     super.dispose();
   }
 
-  int get unitPrice => int.tryParse(cost.text) ?? 0;
-  int get discountPerItem => int.tryParse(discount.text) ?? 0;
-  int get netUnitCost => unitPrice >= discountPerItem
-      ? unitPrice - discountPerItem : 0;
-  int get purchaseTotal => quantity * netUnitCost;
+  int get purchaseTotal =>
+      lines.fold(0, (sum, line) => sum + line.total);
   int get remainingToPay {
     final value = purchaseTotal - (int.tryParse(paid.text) ?? 0);
     return value < 0 ? 0 : value;
@@ -3116,39 +3509,25 @@ class _PurchaseFormState extends State<PurchaseForm> {
           ? '' : '${selected.first['name']}';
     });
   }
-  void _syncSerials() {
-    if (product?['track_imei'] == 1) {
-      if (quantity < 1) {
-        quantity = 1;
-      }
-      while (serials.length < quantity) {
-        serials.add(SerialDraft());
-      }
-      while (serials.length > quantity) {
-        serials.removeLast();
-      }
-    } else {
-      serials.clear();
-    }
-  }
 
-  void _addSerial() => setState(() {
-    serials.add(SerialDraft());
-    quantity = serials.length;
-  });
+  void _addSerial(PurchaseLineDraft line) => setState(() {
+        line.serials.add(SerialDraft());
+        line.quantity = line.serials.length;
+      });
 
-  void _removeSerial(int index) => setState(() {
-    if (serials.length <= 1) return;
-    serials.removeAt(index);
-    quantity = serials.length;
-  });
+  void _removeSerial(PurchaseLineDraft line, int index) => setState(() {
+        if (line.serials.length <= 1) return;
+        line.serials.removeAt(index);
+        line.quantity = line.serials.length;
+      });
 
-  Future<void> scanManyImeis() async {
+  Future<void> scanManyImeis(PurchaseLineDraft line) async {
     final scanned = await Navigator.push<List<String>>(context,
         MaterialPageRoute(builder: (_) => const ImeiBatchScannerPage()));
     if (scanned == null || scanned.isEmpty || !mounted) return;
-    final existingInDraft = serials
-        .map((draft) => draft.imei.trim())
+    final existingInDraft = lines
+        .expand((item) => item.serials)
+        .map((serial) => serial.imei.trim())
         .where((value) => value.isNotEmpty)
         .toSet();
     for (final imei in scanned) {
@@ -3158,15 +3537,15 @@ class _PurchaseFormState extends State<PurchaseForm> {
         continue;
       }
       existingInDraft.add(imei);
-      final blank = serials.where((draft) => draft.imei.trim().isEmpty);
+      final blank = line.serials.where((draft) => draft.imei.trim().isEmpty);
       if (blank.isNotEmpty) {
         blank.first.imei = imei;
       } else {
-        serials.add(SerialDraft(imei: imei));
+        line.serials.add(SerialDraft(imei: imei));
       }
     }
     if (mounted) {
-      setState(() => quantity = serials.length);
+      setState(() => line.quantity = line.serials.length);
     }
   }
 
@@ -3176,16 +3555,11 @@ class _PurchaseFormState extends State<PurchaseForm> {
     if (created != true || !mounted) return;
     final rows = await StoreDb.instance.products();
     if (!mounted || rows.isEmpty) return;
-    setState(() {
-      product = rows.first;
-      quantity = 1;
-      serials.clear();
-      _syncSerials();
-    });
+    if (lines.any((line) => line.product['id'] == rows.first['id'])) return;
+    setState(() => lines.add(PurchaseLineDraft(product: rows.first)));
   }
 
-  Future<void> _pickProduct(
-      List<Map<String, Object?>> products) async {
+  Future<void> _addProduct(List<Map<String, Object?>> products) async {
     if (products.isEmpty) {
       showError(context, 'Chưa có hàng hóa đang kinh doanh');
       return;
@@ -3196,15 +3570,20 @@ class _PurchaseFormState extends State<PurchaseForm> {
       useSafeArea: true,
       builder: (_) => ProductSearchSheet(
         products: products,
-        selectedId: product?['id'] as int?,
       ),
     );
     if (selected == null || !mounted) return;
+    if (lines.any((line) => line.product['id'] == selected['id'])) {
+      showError(context, '${selected['name']} đã có trong phiếu nhập');
+      return;
+    }
+    setState(() => lines.add(PurchaseLineDraft(product: selected)));
+  }
+
+  void _removeLine(PurchaseLineDraft line) {
     setState(() {
-      product = selected;
-      quantity = 1;
-      serials.clear();
-      _syncSerials();
+      lines.remove(line);
+      line.dispose();
     });
   }
 
@@ -3214,82 +3593,38 @@ class _PurchaseFormState extends State<PurchaseForm> {
     body: FutureBuilder<List<Map<String, Object?>>>(future: StoreDb.instance.products(), builder: (context, snap) {
       final products = snap.data ?? [];
       return ListView(padding: const EdgeInsets.all(16), children: [
-        Card(child: ListTile(
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-          leading: const CircleAvatar(child: Icon(Icons.search)),
-          title: Text(
-            product == null ? 'Chọn sản phẩm *' : '${product!['name']}',
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-          subtitle: Text(
-            product == null
-                ? 'Bấm để tìm theo tên, mã hàng, hãng hoặc dung lượng'
-                : [
-                    '${product!['code']}',
-                    if ('${product!['brand']}'.trim().isNotEmpty)
-                      '${product!['brand']}',
-                    if ('${product!['capacity']}'.trim().isNotEmpty)
-                      '${product!['capacity']}',
-                  ].join(' • '),
-          ),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _pickProduct(products),
-        )),
+        Row(children: [
+          const Expanded(child: Text('Sản phẩm nhập',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
+          Text('${lines.length} dòng'),
+        ]),
+        const SizedBox(height: 8),
+        if (lines.isEmpty)
+          const Card(child: Padding(
+            padding: EdgeInsets.all(18),
+            child: Text('Chưa có sản phẩm. Bấm “Thêm sản phẩm” để tạo phiếu.'),
+          )),
+        ...lines.map(_buildLine),
+        FilledButton.tonalIcon(
+          onPressed: () => _addProduct(products),
+          icon: const Icon(Icons.add_shopping_cart),
+          label: const Text('Thêm sản phẩm vào phiếu'),
+        ),
         const SizedBox(height: 8),
         OutlinedButton.icon(
           onPressed: createProduct,
           icon: const Icon(Icons.add_box_outlined),
-          label: const Text('Tạo hàng hóa hoặc phân loại mới'),
+          label: const Text('Tạo hàng hóa mới'),
         ),
-        const SizedBox(height: 12),
-        if (product?['track_imei'] == 1)
-          Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            const Text('Danh sách IMEI',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-            const Text('Mỗi IMEI tương ứng với một máy nhập.'),
-            const SizedBox(height: 8),
-            FilledButton.tonalIcon(
-              onPressed: scanManyImeis,
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('Quét liên tục nhiều IMEI bằng camera'),
-            ),
-            const SizedBox(height: 8),
-            ...List.generate(serials.length, (i) => SerialEditor(
-                key: ObjectKey(serials[i]),
-                index: i, draft: serials[i], onRemove: () => _removeSerial(i),
-                canRemove: serials.length > 1)),
-            OutlinedButton.icon(
-              onPressed: _addSerial,
-              icon: const Icon(Icons.add),
-              label: const Text('Thêm Serial / IMEI'),
-            ),
-          ])
-        else
-          TextFormField(initialValue: '$quantity', keyboardType: TextInputType.number,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              decoration: const InputDecoration(labelText: 'Số lượng *'),
-              onChanged: (v) => setState(() => quantity = int.tryParse(v) ?? 0)),
-        const SizedBox(height: 12),
-        TextField(controller: cost, keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(labelText: 'Đơn giá nhập *'),
-            onChanged: (_) => setState(() {})),
-        const SizedBox(height: 12),
-        TextField(controller: discount, keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(
-                labelText: 'Giảm giá trên mỗi sản phẩm'),
-            onChanged: (_) => setState(() {})),
-        const SizedBox(height: 12),
+        const SizedBox(height: 14),
         Card(color: const Color(0xFFF5F7FA), child: Padding(
           padding: const EdgeInsets.all(14),
           child: Column(children: [
-            _summaryRow('Số lượng nhập', '$quantity', strong: true),
-            _summaryRow('Đơn giá', vnd(unitPrice)),
-            _summaryRow('Giảm giá', vnd(discountPerItem)),
-            _summaryRow('Giá nhập', vnd(netUnitCost), strong: true),
-            _summaryRow('Thành tiền', vnd(purchaseTotal), strong: true),
+            _summaryRow('Số mặt hàng', '${lines.length}'),
+            _summaryRow('Tổng số lượng',
+                '${lines.fold<int>(0, (sum, line) => sum + line.lineQuantity)}'),
+            _summaryRow('Tổng tiền phiếu nhập', vnd(purchaseTotal),
+                strong: true),
           ]),
         )),
         const SizedBox(height: 12),
@@ -3324,33 +3659,112 @@ class _PurchaseFormState extends State<PurchaseForm> {
     }),
   );
 
+  Widget _buildLine(PurchaseLineDraft line) {
+    final product = line.product;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              CircleAvatar(child: Icon(line.tracksImei
+                  ? Icons.phone_android : Icons.inventory_2)),
+              const SizedBox(width: 10),
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('${product['name']}', style: const TextStyle(
+                      fontSize: 17, fontWeight: FontWeight.bold)),
+                  Text([
+                    '${product['code']}',
+                    if ('${product['brand']}'.trim().isNotEmpty)
+                      '${product['brand']}',
+                    if ('${product['capacity']}'.trim().isNotEmpty)
+                      '${product['capacity']}',
+                  ].join(' • ')),
+                ],
+              )),
+              IconButton(
+                tooltip: 'Xóa dòng',
+                onPressed: () => _removeLine(line),
+                icon: const Icon(Icons.close),
+              ),
+            ]),
+            const SizedBox(height: 12),
+            if (line.tracksImei) ...[
+              Row(children: [
+                const Expanded(child: Text('Danh sách IMEI',
+                    style: TextStyle(fontWeight: FontWeight.bold))),
+                Text('${line.serials.length} máy'),
+              ]),
+              const SizedBox(height: 8),
+              FilledButton.tonalIcon(
+                onPressed: () => scanManyImeis(line),
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('Quét liên tục nhiều IMEI'),
+              ),
+              const SizedBox(height: 8),
+              ...List.generate(line.serials.length, (index) => SerialEditor(
+                    key: ObjectKey(line.serials[index]),
+                    index: index,
+                    draft: line.serials[index],
+                    onRemove: () => _removeSerial(line, index),
+                    canRemove: line.serials.length > 1,
+                  )),
+              OutlinedButton.icon(
+                onPressed: () => _addSerial(line),
+                icon: const Icon(Icons.add),
+                label: const Text('Thêm Serial / IMEI'),
+              ),
+            ] else
+              TextFormField(
+                key: ObjectKey(line),
+                initialValue: '${line.quantity}',
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(labelText: 'Số lượng *'),
+                onChanged: (value) => setState(
+                    () => line.quantity = int.tryParse(value) ?? 0),
+              ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: line.cost,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(labelText: 'Đơn giá nhập *'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: line.discount,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(
+                  labelText: 'Giảm giá trên mỗi sản phẩm'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [
+              const Expanded(child: Text('Thành tiền',
+                  style: TextStyle(fontWeight: FontWeight.w600))),
+              Text(vnd(line.total), style: const TextStyle(
+                  fontSize: 17, fontWeight: FontWeight.bold)),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
+
   Future<void> save() async {
-    if (product == null) return showError(context, 'Hãy chọn mẫu hàng');
-    if (product!['track_imei'] == 1) quantity = serials.length;
-    if (quantity <= 0) return showError(context, 'Số lượng phải lớn hơn 0');
-    if (unitPrice <= 0) return showError(context, 'Đơn giá nhập phải lớn hơn 0');
-    if (discountPerItem < 0 || discountPerItem > unitPrice) {
-      return showError(context, 'Giảm giá không được lớn hơn đơn giá');
-    }
-    if (product!['track_imei'] == 1 &&
-        serials.any((s) => s.imei.trim().isEmpty)) {
-      return showError(context, 'Hãy nhập đủ IMEI');
-    }
-    if (product!['track_imei'] == 1 &&
-        serials.any((s) => !isValidImei(s.imei.trim()))) {
-      return showError(context, 'IMEI phải đủ 15 số và đúng mã kiểm tra');
-    }
-    if (product!['track_imei'] == 1 &&
-        serials.map((s) => s.imei.trim()).toSet().length != serials.length) {
-      return showError(context, 'Danh sách đang có IMEI trùng nhau');
-    }
+    if (lines.isEmpty) return showError(context, 'Hãy thêm ít nhất một sản phẩm');
     setState(() => saving = true);
     try {
-      for (final s in serials) { s.cost = netUnitCost; }
-      await StoreDb.instance.completePurchase(productId: product!['id'] as int,
-          quantity: quantity, unitCost: netUnitCost, supplier: supplier.text,
+      await StoreDb.instance.completeMultiPurchase(items: lines,
+          supplier: supplier.text,
           paid: int.tryParse(paid.text) ?? 0, paymentMethod: payment,
-          serials: serials);
+      );
       if (mounted) Navigator.pop(context, true);
     } catch (e) { showError(context, e); setState(() => saving = false); }
   }
@@ -4788,6 +5202,9 @@ class MorePage extends StatelessWidget {
       MenuAction(Icons.category_outlined, 'Phân loại hàng hóa', () =>
           Navigator.push(context, MaterialPageRoute(
               builder: (_) => const CategoryManagerPage()))),
+      MenuAction(Icons.business_outlined, 'Danh mục hãng', () =>
+          Navigator.push(context, MaterialPageRoute(
+              builder: (_) => const BrandManagerPage()))),
       MenuAction(Icons.download, 'Nhập hàng', () async { final ok = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => const PurchaseForm())); if (ok == true) onChanged(); }),
       MenuAction(Icons.fact_check, 'Kiểm kho', () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const StocktakePage())); onChanged(); }),
       MenuAction(Icons.assignment_return, 'Trả hàng nhập', () async { final ok = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => const InventoryActionPage(kind: 'supplier_return'))); if (ok == true) onChanged(); }),
@@ -4818,7 +5235,6 @@ class MorePage extends StatelessWidget {
       MenuAction(Icons.print, 'Cài đặt máy in K80', () => Navigator.push(context,
           MaterialPageRoute(builder: (_) => const PrinterSettingsPage()))),
       MenuAction(Icons.backup, 'Sao lưu & khôi phục', () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BackupPage())); onChanged(); }),
-      MenuAction(Icons.password, 'Đổi mã PIN', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ChangePinPage()))),
     ]),
   ]);
 }
@@ -4858,18 +5274,27 @@ class _CategoryManagerPageState extends State<CategoryManagerPage> {
                 final row = rows[index];
                 final count = (row['product_count'] as num? ?? 0).toInt();
                 return Card(child: ListTile(
-                  leading: const CircleAvatar(child: Icon(Icons.category)),
-                  title: Text('${row['name']}',
+                  leading: CircleAvatar(child: Icon(row['parent_id'] == null
+                      ? Icons.folder_outlined
+                      : Icons.subdirectory_arrow_right)),
+                  title: Text('${row['display_name'] ?? row['name']}',
                       style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text('$count hàng hóa'),
+                  subtitle: Text(row['parent_id'] == null
+                      ? '$count hàng hóa • Nhóm cấp 1'
+                      : '$count hàng hóa • Phân loại cấp 2'),
                   trailing: PopupMenuButton<String>(
                     onSelected: (action) {
+                      if (action == 'add_child') add(parent: row);
                       if (action == 'rename') rename(row);
                       if (action == 'delete') remove(row);
                     },
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
-                      PopupMenuItem(value: 'delete', child: Text('Xóa')),
+                    itemBuilder: (_) => [
+                      if (row['parent_id'] == null)
+                        const PopupMenuItem(value: 'add_child',
+                            child: Text('Thêm phân loại con')),
+                      const PopupMenuItem(value: 'rename',
+                          child: Text('Đổi tên')),
+                      const PopupMenuItem(value: 'delete', child: Text('Xóa')),
                     ],
                   ),
                 ));
@@ -4879,11 +5304,12 @@ class _CategoryManagerPageState extends State<CategoryManagerPage> {
         ),
       );
 
-  Future<void> add() async {
+  Future<void> add({Map<String, Object?>? parent}) async {
     final value = await promptNewCategory(context);
     if (value == null) return;
     try {
-      await StoreDb.instance.addProductCategory(value);
+      await StoreDb.instance.addProductCategory(value,
+          parentId: parent?['id'] as int?);
       if (mounted) setState(() {});
     } catch (error) {
       if (mounted) showError(context, error);
@@ -4927,6 +5353,121 @@ class _CategoryManagerPageState extends State<CategoryManagerPage> {
     if (!accepted) return;
     try {
       await StoreDb.instance.deleteProductCategory(row['id'] as int);
+      if (mounted) setState(() {});
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+}
+
+class BrandManagerPage extends StatefulWidget {
+  const BrandManagerPage({super.key});
+
+  @override
+  State<BrandManagerPage> createState() => _BrandManagerPageState();
+}
+
+class _BrandManagerPageState extends State<BrandManagerPage> {
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Danh mục hãng')),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: add,
+          icon: const Icon(Icons.add),
+          label: const Text('Thêm hãng'),
+        ),
+        body: FutureBuilder<List<Map<String, Object?>>>(
+          future: StoreDb.instance.productBrands(),
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final rows = snapshot.data!;
+            if (rows.isEmpty) {
+              return const EmptyState(Icons.business_outlined,
+                  'Chưa có hãng', 'Bấm “Thêm hãng” để bắt đầu.');
+            }
+            return ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
+              itemCount: rows.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final row = rows[index];
+                final count = (row['product_count'] as num? ?? 0).toInt();
+                return Card(child: ListTile(
+                  leading: const CircleAvatar(child: Icon(Icons.business)),
+                  title: Text('${row['name']}',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('$count hàng hóa'),
+                  trailing: PopupMenuButton<String>(
+                    onSelected: (action) {
+                      if (action == 'rename') rename(row);
+                      if (action == 'delete') remove(row);
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'rename', child: Text('Đổi tên')),
+                      PopupMenuItem(value: 'delete', child: Text('Xóa')),
+                    ],
+                  ),
+                ));
+              },
+            );
+          },
+        ),
+      );
+
+  Future<String?> prompt(String title, {String initial = ''}) async {
+    final controller = TextEditingController(text: initial);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Tên hãng'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Hủy')),
+          FilledButton(onPressed: () =>
+              Navigator.pop(dialogContext, controller.text.trim()),
+              child: const Text('Lưu')),
+        ],
+      ),
+    );
+    controller.dispose();
+    return value == null || value.isEmpty ? null : value;
+  }
+
+  Future<void> add() async {
+    final value = await prompt('Thêm hãng');
+    if (value == null) return;
+    try {
+      await StoreDb.instance.addProductBrand(value);
+      if (mounted) setState(() {});
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+
+  Future<void> rename(Map<String, Object?> row) async {
+    final value = await prompt('Đổi tên hãng', initial: '${row['name']}');
+    if (value == null) return;
+    try {
+      await StoreDb.instance.renameProductBrand(row['id'] as int, value);
+      if (mounted) setState(() {});
+    } catch (error) {
+      if (mounted) showError(context, error);
+    }
+  }
+
+  Future<void> remove(Map<String, Object?> row) async {
+    final accepted = await confirm(context, 'Xóa hãng',
+        'Xóa hãng “${row['name']}”? Hãng đang có hàng hóa sẽ không thể xóa.');
+    if (!accepted) return;
+    try {
+      await StoreDb.instance.deleteProductBrand(row['id'] as int);
       if (mounted) setState(() {});
     } catch (error) {
       if (mounted) showError(context, error);
@@ -8814,6 +9355,45 @@ Future<String?> promptNewCategory(BuildContext context) async {
         ),
         onSubmitted: (text) {
           if (text.trim().isNotEmpty) Navigator.pop(dialogContext, text.trim());
+        },
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Hủy'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final text = controller.text.trim();
+            if (text.isNotEmpty) Navigator.pop(dialogContext, text);
+          },
+          child: const Text('Tạo'),
+        ),
+      ],
+    ),
+  );
+  controller.dispose();
+  return value;
+}
+
+Future<String?> promptNewBrand(BuildContext context) async {
+  final controller = TextEditingController();
+  final value = await showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Tạo hãng mới'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        textCapitalization: TextCapitalization.words,
+        decoration: const InputDecoration(
+          labelText: 'Tên hãng',
+          hintText: 'Ví dụ: Apple, Samsung, Xiaomi…',
+        ),
+        onSubmitted: (text) {
+          if (text.trim().isNotEmpty) {
+            Navigator.pop(dialogContext, text.trim());
+          }
         },
       ),
       actions: [
