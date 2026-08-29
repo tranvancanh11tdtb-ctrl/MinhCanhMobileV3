@@ -13,7 +13,7 @@
 - Một phiếu nhập chứa nhiều sản phẩm, nhiều IMEI và giá/giảm giá riêng từng dòng.
 - Quản lý phân loại hàng hóa hai cấp và danh mục hãng.
 - Lọc kiểm kho theo phân loại, không làm mất dữ liệu từ các bản cũ.
-- Không đăng nhập, không mã PIN, không dữ liệu mẫu.
+- Có mã PIN bảo vệ ứng dụng và cho phép đổi PIN trong phần cài đặt.
 
 ## Build APK bằng GitHub Actions
 

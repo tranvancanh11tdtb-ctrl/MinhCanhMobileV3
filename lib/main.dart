@@ -51,7 +51,7 @@ class MinhCanhApp extends StatelessWidget {
             fillColor: Colors.white,
           ),
         ),
-        home: const HomeShell(),
+        home: const PinGate(),
       );
 }
 
@@ -5235,6 +5235,7 @@ class MorePage extends StatelessWidget {
       MenuAction(Icons.print, 'Cài đặt máy in K80', () => Navigator.push(context,
           MaterialPageRoute(builder: (_) => const PrinterSettingsPage()))),
       MenuAction(Icons.backup, 'Sao lưu & khôi phục', () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BackupPage())); onChanged(); }),
+      MenuAction(Icons.password, 'Đổi mã PIN', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ChangePinPage()))),
     ]),
   ]);
 }
