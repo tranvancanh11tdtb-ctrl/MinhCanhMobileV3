@@ -2,7 +2,7 @@
 
 Ứng dụng Flutter quản lý cửa hàng điện thoại, chạy offline bằng SQLite.
 
-## Chức năng bản lõi 0.1
+## Chức năng V3.10
 
 - Tạo mẫu điện thoại hoặc phụ kiện.
 - Một mẫu điện thoại chứa nhiều máy, mỗi máy có một IMEI và giá vốn riêng.
@@ -10,7 +10,10 @@
 - Bán đúng IMEI; phụ kiện không được bán vượt tồn.
 - Hóa đơn, doanh thu và lợi nhuận theo đúng giá vốn.
 - Hủy hóa đơn để hoàn lại IMEI/số lượng tồn.
-- Không đăng nhập, không mã PIN, không dữ liệu mẫu.
+- Một phiếu nhập chứa nhiều sản phẩm, nhiều IMEI và giá/giảm giá riêng từng dòng.
+- Quản lý phân loại hàng hóa hai cấp và danh mục hãng.
+- Lọc kiểm kho theo phân loại, không làm mất dữ liệu từ các bản cũ.
+- Có mã PIN bảo vệ ứng dụng và cho phép đổi PIN trong phần cài đặt.
 
 ## Build APK bằng GitHub Actions
 
