@@ -3194,7 +3194,7 @@ class _ProductEditFormState extends State<ProductEditForm> {
       StoreDb.instance.productCategories(),
       StoreDb.instance.productBrands(),
     ]);
-    final rows = values[0] as List<Map<String, Object?>>;
+    final rows = values[0];
     if (!mounted) return;
     setState(() {
       categories = rows.map((row) => '${row['name']}').toList();
@@ -3204,7 +3204,7 @@ class _ProductEditFormState extends State<ProductEditForm> {
       };
       if (!categories.contains(category)) categories.add(category);
       categories.sort();
-      brands = (values[1] as List<Map<String, Object?>>)
+      brands = values[1]
           .map((row) => '${row['name']}')
           .toList();
       if (brand.text.trim().isNotEmpty && !brands.contains(brand.text)) {
