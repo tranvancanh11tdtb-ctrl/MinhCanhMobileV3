@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Cảnh App Lock</string>
+    <string name="accessibility_service_description">Phát hiện ứng dụng đang mở để hiển thị màn khóa. Dịch vụ không đọc hoặc lưu nội dung trên màn hình.</string>
+</resources>
