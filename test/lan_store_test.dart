@@ -36,13 +36,27 @@ void main() {
     expect(store.executeRemote({'operation':'getSetting','arguments':{'key':'pin'}}),throwsStateError);
     final response = await store.executeRemote({'operation':'exportBackup'});
     final backup = jsonDecode(response['value'] as String) as Map;
-    expect((backup['app_settings'] as List).where((r)=>r['key']=='pin'),isEmpty);
+    expect((backup['app_settings'] as List).where((r)=>r['setting_key']=='pin'),isEmpty);
     expect(await store.getSetting('pin'),'1234');
   });
   test('desktop can read payment settings', () async {
     await store.setSetting('payment_bank_bin','970422');
     final result = await store.executeRemote({'operation':'getSetting','arguments':{'key':'payment_bank_bin'}});
     expect(result['value'],'970422');
+  });
+  test('remote restore preserves device PIN and is replay safe', () async {
+    final backup=jsonDecode(await store.exportBackup()) as Map<String,dynamic>;
+    backup['app_settings']=[{'setting_key':'pin','setting_value':'9999'}];
+    final request=<String,Object?>{'operation':'restoreBackup','arguments':{'source':jsonEncode(backup)},'requestId':'restore-request-0001','revision':await revision()};
+    await store.executeRemote(request);
+    expect(await store.getSetting('pin'),'1234');
+    await store.executeRemote(request);
+    expect(await store.getSetting('pin'),'1234');
+  });
+  test('debt reduction validates actual balance instead of caller balance', () async {
+    final id=await store.addCustomerDirectory(name:'Debt test',phone:'0900000001',note:'');
+    await store.addDebtAdjustment(partyType:'customer',partyId:id,amount:100,increase:true,currentDebt:0,note:'');
+    await expectLater(store.addDebtAdjustment(partyType:'customer',partyId:id,amount:101,increase:false,currentDebt:999,note:''),throwsException);
   });
   test('unknown operations rejected', () async {
     expect(store.executeRemote({'operation':'rawQuery','arguments':{'sql':'SELECT * FROM app_settings'}}),throwsArgumentError);
