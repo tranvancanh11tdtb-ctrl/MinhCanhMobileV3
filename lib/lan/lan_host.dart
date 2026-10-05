@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'pairing_service.dart';
@@ -6,6 +8,7 @@ final lanHost=LanHost();
 class LanHost {
  final pairing=PairingService();
  HttpServer? _server;
+ Timer? _networkCheck;
  final List<String> addresses=[];
  bool get running=>_server!=null;
  static const channel=MethodChannel('vn.minhcanhmobile/lan');
@@ -19,10 +22,19 @@ class LanHost {
    final server=await HttpServer.bind(InternetAddress.anyIPv4,0);
    _server=server;addresses..clear()..addAll(ips.map((ip)=>'http://$ip:${server.port}'));
    pairing.newCode();
+   channel.setMethodCallHandler((call) async {if(call.method=='stopped')await _close();});
    try {await channel.invokeMethod('start',{'address':addresses.first});}catch(_){await server.close(force:true);_server=null;addresses.clear();rethrow;}
    server.listen((request)=>_serve(request,handler));
+   _networkCheck=Timer.periodic(const Duration(seconds:5), (_) async {
+     try {
+       final current=await NetworkInterface.list(type:InternetAddressType.IPv4);
+       final hosts=current.expand((i)=>i.addresses).map((a)=>a.address).toSet();
+       if(running && !addresses.any((a)=>hosts.contains(Uri.parse(a).host)))await stop();
+     } catch(_) {await stop();}
+   });
  }
- Future<void> stop() async {pairing.revokeAll();await _server?.close(force:true);_server=null;addresses.clear();await channel.invokeMethod('stop');}
+ Future<void> _close() async {_networkCheck?.cancel();_networkCheck=null;pairing.revokeAll();final old=_server;_server=null;addresses.clear();await old?.close(force:true);}
+ Future<void> stop() async {await _close();await channel.invokeMethod('stop');}
  Future<void> _serve(HttpRequest req,Future<Map<String,Object?>> Function(Map<String,Object?>) handler) async {
    final res=req.response;
    try{

@@ -28,3 +28,10 @@ jobs:
         with:
           name: MinhCanhMobileV311-Web
           path: build/web
+      - run: python3 tool/configure_android.py
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MinhCanhMobileV311-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
