@@ -5,6 +5,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: v311-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -12,9 +15,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.47.6'
           channel: stable
           cache: true
       - run: flutter pub get
       - run: dart tool/check_pairing.dart
       - run: flutter analyze --no-fatal-infos
       - run: flutter test
+      - run: flutter create --platforms android,web --org vn.minhcanhmobile --project-name minh_canh_mobile_v3 .
+      - run: flutter build web --release --no-web-resources-cdn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MinhCanhMobileV311-Web
+          path: build/web
