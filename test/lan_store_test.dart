@@ -54,7 +54,8 @@ void main() {
     expect(await store.getSetting('pin'),'1234');
   });
   test('debt reduction validates actual balance instead of caller balance', () async {
-    final id=await store.addCustomerDirectory(name:'Debt test',phone:'0900000001',note:'');
+    final customer=await store.addCustomerDirectory(name:'Debt test',phone:'0900000001',note:'');
+    final id=customer['id'] as int;
     await store.addDebtAdjustment(partyType:'customer',partyId:id,amount:100,increase:true,currentDebt:0,note:'');
     await expectLater(store.addDebtAdjustment(partyType:'customer',partyId:id,amount:101,increase:false,currentDebt:999,note:''),throwsException);
   });
