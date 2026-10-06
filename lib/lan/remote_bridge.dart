@@ -6,6 +6,14 @@ import 'package:http/http.dart' as http;
 import '../platform/browser_print_stub.dart' if (dart.library.html) '../platform/browser_print.dart';
 
 final remoteBridge=RemoteBridge();
+class RemoteFailure implements Exception {
+  RemoteFailure(this.status, this.message, this.code);
+  final int status;
+  final String message;
+  final String? code;
+  bool get notCommitted => status == 400 && code == 'not_committed';
+  @override String toString() => message;
+}
 class RemoteBridge extends ChangeNotifier {
   String? _token;
   int? revision;
@@ -19,7 +27,7 @@ class RemoteBridge extends ChangeNotifier {
   Future<Map<String,dynamic>> _post(String path,Map<String,Object?> body) async {
     final response=await http.post(base.resolve(path),headers:{'Content-Type':'application/json',if(_token!=null)'Authorization':'Bearer $_token'},body:jsonEncode(body)).timeout(const Duration(seconds:20));
     final result=jsonDecode(response.body) as Map<String,dynamic>;
-    if(response.statusCode!=200)throw StateError(result['error'] as String? ?? 'Không thể kết nối điện thoại');
+    if(response.statusCode!=200)throw RemoteFailure(response.statusCode,result['error'] as String? ?? 'Không thể kết nối điện thoại',result['code'] as String?);
     return result;
   }
   Future<void> pair(String code) async {
@@ -59,7 +67,11 @@ class RemoteBridge extends ChangeNotifier {
       if(write||revision==null)revision=current;
       connected=true;if(write){pending=null;savePendingRequest(null);}
       return response['value'];
-    }on StateError {if(write){pending=null;savePendingRequest(null);}rethrow;}
+    }on RemoteFailure catch(e) {
+      if(write&&e.notCommitted){pending=null;savePendingRequest(null);}
+      if(e.status==401)connected=false;
+      message=e.message;rethrow;
+    }
     catch(_) {connected=false;message=write?'Chưa xác định kết quả lưu. Bấm kiểm tra giao dịch, không nhập lại.':'Không kết nối được điện thoại.';rethrow;}
     finally{if(write)busy=false;notifyListeners();}
   }
@@ -67,8 +79,17 @@ class RemoteBridge extends ChangeNotifier {
     final request=pending;if(request==null)return;
     busy=true;notifyListeners();
     try {final response=await _post('/api/call',request);revision=response['revision'] as int;latestRevision=revision;pending=null;savePendingRequest(null);connected=true;message='Giao dịch đã được xác nhận. Hãy tải lại để xem kết quả.';}
-    on StateError catch(e){message=e.message.toString();}
+    on RemoteFailure catch(e){
+      if(e.notCommitted){pending=null;savePendingRequest(null);await pollAfterRejection();}
+      if(e.status==401)connected=false;
+      message=e.notCommitted?'Giao dịch chưa được lưu. Tải lại dữ liệu trước khi nhập lại.':e.message;
+    }
+    catch(_){connected=false;message='Chưa xác định kết quả. Kiểm tra Wi-Fi rồi thử kiểm tra giao dịch lại.';}
     finally{busy=false;notifyListeners();}
+  }
+  Future<void> pollAfterRejection() async {
+    try {final r=await _post('/api/call',{'operation':'dashboard','arguments':{}});latestRevision=r['revision'] as int;connected=true;}
+    catch(_){connected=false;}
   }
   void disconnect(){_poll?.cancel();_token=null;connected=false;revision=null;notifyListeners();}
 }

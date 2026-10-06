@@ -4,6 +4,9 @@ class StoreDb {
   StoreDb._();
   static final instance = StoreDb._();
   Database? _db;
+  final remoteChanges=ValueNotifier<int>(0);
+  bool _nativeStale=false;
+  void acknowledgeRemoteChanges(){_nativeStale=false;}
 
   Future<Database> get database async => _db ??= await _open();
 
@@ -2045,10 +2048,15 @@ class StoreDb {
       'product_brands',
       'app_settings',
     ];
-    final db = await _executor;
-    await db.execute('PRAGMA foreign_keys = OFF');
-    try {
-      await _nestedTransaction((txn) async {
+    if(decoded['backup_version']!=6)throw Exception('Phiên bản sao lưu chưa được hỗ trợ');
+    for(final table in insertOrder){
+      final rows=decoded[table];
+      if(rows is! List || rows.any((row)=>row is! Map))throw Exception('Bản sao lưu thiếu hoặc hỏng bảng $table');
+    }
+    await _nestedTransaction((txn) async {
+        await txn.execute('CREATE TABLE IF NOT EXISTS restore_safety(id INTEGER PRIMARY KEY, source TEXT NOT NULL)');
+        await txn.insert('restore_safety',{'id':1,'source':await _localExportBackup()},conflictAlgorithm:ConflictAlgorithm.replace);
+        await txn.execute('PRAGMA defer_foreign_keys = ON');
         for (final table in deleteOrder) {
           await txn.delete(table);
         }
@@ -2068,10 +2076,8 @@ class StoreDb {
         await _backfillDirectories(txn);
         await _createV6Tables(txn);
         await _createV7Tables(txn);
+        if((await txn.rawQuery('PRAGMA foreign_key_check')).isNotEmpty)throw Exception('Bản sao lưu có dữ liệu liên kết không hợp lệ');
       });
-    } finally {
-      await db.execute('PRAGMA foreign_keys = ON');
-    }
   }
 
   Future<Map<String, int>> _localReportSummary(DateTime start, DateTime end) async {
@@ -2671,7 +2677,7 @@ class StoreDb {
   }
   Future<String> exportBackup() async {
     if(kIsWeb) { final value=await remoteBridge.call('exportBackup',{},write:false); return value as String; }
-    return _callLocal<String>(()=>_localExportBackup(), write:false);
+    return _nestedTransaction((_)=>_localExportBackup());
   }
   Future<void> restoreBackup(String source) async {
     if(kIsWeb) { await remoteBridge.call('restoreBackup',{'source':source},write:true); return; }
@@ -2719,6 +2725,7 @@ class StoreDb {
   Future<T> _callLocal<T>(Future<T> Function() body,{required bool write}) async {
     if(!write || Zone.current[_transactionKey]!=null)return body();
     return _nestedTransaction((txn) async {
+      if(_nativeStale)throw StateError('Dữ liệu đã đổi trên máy tính. Quay về màn hình chính và bấm Tải lại dữ liệu trước khi lưu.');
       final value=await body();
       await txn.execute('UPDATE lan_revision SET value=value+1 WHERE id=1');
       return value;
@@ -2735,7 +2742,8 @@ class StoreDb {
     final requestId=request['requestId'] as String? ?? '';
     if(write && !RegExp(r'^[a-zA-Z0-9_-]{16,100}$').hasMatch(requestId))throw ArgumentError('Mã giao dịch không hợp lệ');
     final hash=sha256.convert(utf8.encode(jsonEncode([operation,args]))).toString();
-    return _nestedTransaction((txn) async {
+    var changed=false;
+    final response=await _nestedTransaction((txn) async {
       final revision=(await txn.query('lan_revision',where:'id=1')).single['value'] as int;
       if(write) {
         final old=await txn.query('lan_requests',where:'request_id=?',whereArgs:[requestId]);
@@ -2754,8 +2762,6 @@ class StoreDb {
         final backup=jsonDecode(args['source'] as String) as Map<String,dynamic>;
         final secure=await txn.query('app_settings',where:'setting_key IN (?, ?)',whereArgs:['pin','biometric_enabled']);
         backup['app_settings']=[...(backup['app_settings'] as List? ?? []).where((r)=>!['pin','biometric_enabled'].contains(r['setting_key'])),...secure];
-        await txn.execute('CREATE TABLE IF NOT EXISTS restore_safety(id INTEGER PRIMARY KEY, source TEXT NOT NULL)');
-        await txn.insert('restore_safety',{'id':1,'source':await _localExportBackup()},conflictAlgorithm:ConflictAlgorithm.replace);
         await _localRestoreBackup(jsonEncode(backup));
         value=null;
       } else {
@@ -2764,9 +2770,13 @@ class StoreDb {
       if(write){
         await txn.execute('UPDATE lan_revision SET value=value+1 WHERE id=1');
         await txn.insert('lan_requests',{'request_id':requestId,'payload_hash':hash,'result':jsonEncode(value),'revision':revision+1});
+        changed=true;
+        _nativeStale=true;
       }
       return {'value':value,'revision':revision+(write?1:0)};
     });
+    if(changed)remoteChanges.value++;
+    return response;
   }
   Future<Object?> _dispatch(String operation,Map<String,Object?> args) async {
     switch(operation){

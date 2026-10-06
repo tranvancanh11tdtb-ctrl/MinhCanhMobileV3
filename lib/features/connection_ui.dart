@@ -1,5 +1,36 @@
 part of '../main.dart';
 
+class BiometricSettingsPage extends StatefulWidget {
+  const BiometricSettingsPage({super.key});
+  @override State<BiometricSettingsPage> createState()=>_BiometricSettingsPageState();
+}
+class _BiometricSettingsPageState extends State<BiometricSettingsPage> {
+  final pin=TextEditingController();
+  late final security=DeviceUnlock(read:StoreDb.instance.getSetting,write:StoreDb.instance.setSetting);
+  bool enabled=false,busy=true;
+  @override void initState(){super.initState();load();}
+  Future<void> load() async {
+    final value=await StoreDb.instance.getSetting('biometric_enabled');
+    if(mounted)setState((){enabled=value=='1';busy=false;});
+  }
+  @override void dispose(){pin.dispose();super.dispose();}
+  Future<void> change() async {
+    setState(()=>busy=true);
+    try {await security.setEnabled(!enabled,pin.text);if(mounted){pin.clear();setState(()=>enabled=!enabled);}}
+    catch(e){if(mounted)showError(context,e);}
+    finally{if(mounted)setState(()=>busy=false);}
+  }
+  @override Widget build(BuildContext context)=>Scaffold(
+    appBar:AppBar(title:const Text('Mở khóa sinh trắc học')),
+    body:ListView(padding:const EdgeInsets.all(24),children:[
+      const Icon(Icons.fingerprint,size:64,color:Color(0xff0877d1)),
+      const SizedBox(height:20),Text(enabled?'Đang bật':'Đang tắt',style:const TextStyle(fontSize:22,fontWeight:FontWeight.bold)),
+      const SizedBox(height:12),const Text('Dùng vân tay hoặc sinh trắc học đã đăng ký trên điện thoại. Mã PIN luôn dùng được khi xác thực bị hủy hoặc thiết bị không hỗ trợ. App khóa lại sau 60 giây ở nền.'),
+      const SizedBox(height:20),TextField(controller:pin,obscureText:true,maxLength:6,keyboardType:TextInputType.number,inputFormatters:[FilteringTextInputFormatter.digitsOnly],decoration:const InputDecoration(labelText:'Mã PIN hiện tại')),
+      const SizedBox(height:12),FilledButton(onPressed:busy?null:change,child:Text(busy?'Đang xử lý…':enabled?'Tắt sinh trắc học':'Bật sinh trắc học')),
+    ]));
+}
+
 class PairGate extends StatefulWidget {
   const PairGate({super.key});
   @override State<PairGate> createState()=>_PairGateState();

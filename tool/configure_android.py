@@ -14,6 +14,12 @@ s = s.replace('android:label="minh_canh_mobile_v3"', 'android:label="Minh Cảnh
 s = s.replace('<application', '<application android:usesCleartextTraffic="true"', 1)
 s = s.replace('</application>', '<service android:name=".LanService" android:exported="false" android:foregroundServiceType="connectedDevice" android:stopWithTask="true" />\n    </application>')
 manifest.write_text(s)
+# local_auth requires an AppCompat launch theme, including older Android.
+for styles in (base / 'res').glob('values*/styles.xml'):
+    theme = styles.read_text()
+    theme = theme.replace('parent="@android:style/Theme.Light.NoTitleBar"', 'parent="Theme.AppCompat.DayNight.NoActionBar"')
+    theme = theme.replace('parent="@android:style/Theme.Black.NoTitleBar"', 'parent="Theme.AppCompat.DayNight.NoActionBar"')
+    styles.write_text(theme)
 kotlin = base / 'kotlin' / Path(package.replace('.', '/'))
 kotlin.mkdir(parents=True, exist_ok=True)
 (kotlin / 'MainActivity.kt').write_text('''package vn.minhcanhmobile.minh_canh_mobile_v3

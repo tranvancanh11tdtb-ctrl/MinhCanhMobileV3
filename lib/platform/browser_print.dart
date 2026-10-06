@@ -7,6 +7,10 @@ void browserOpenPdf(Uint8List bytes, String name) {
   html.AnchorElement(href:url)..target='_blank'..download=name..click();
   // Keep URL alive until this page is closed; some browsers open the PDF lazily.
 }
+void browserDownloadBackup(String source, String name) {
+  final url=html.Url.createObjectUrlFromBlob(html.Blob([source],'application/json;charset=utf-8'));
+  html.AnchorElement(href:url)..download=name..click();
+}
 Map<String,Object?>? readPendingRequest() {
   final source=html.window.sessionStorage['mcm_pending'];
   if(source==null)return null;

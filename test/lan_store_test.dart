@@ -18,6 +18,7 @@ void main() {
     await (await store.database).close();
     await dir.delete(recursive: true);
   });
+  setUp(() {store.acknowledgeRemoteChanges();});
   Future<int> revision() async => (await store.executeRemote({'operation':'dashboard'}))['revision'] as int;
   test('retry returns same result and cannot change payload', () async {
     final request = <String,Object?>{'operation':'addProductBrand','arguments':{'rawName':'Retry brand'},'requestId':'request-retry-0001','revision':await revision()};

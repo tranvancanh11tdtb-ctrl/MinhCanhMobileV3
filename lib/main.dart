@@ -25,6 +25,7 @@ import 'package:sqflite/sqflite.dart';
 
 import 'scanner_page.dart';
 import 'vietqr.dart';
+import 'features/device_unlock.dart';
 
 part 'features/upgrade_ui.dart';
 part 'data/store.dart';
@@ -151,7 +152,27 @@ class PinGate extends StatefulWidget {
   State<PinGate> createState() => _PinGateState();
 }
 
-class _PinGateState extends State<PinGate> {
+class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
+  late final deviceUnlock = DeviceUnlock(read:StoreDb.instance.getSetting,write:StoreDb.instance.setSetting);
+  bool biometrics=false, authenticating=false;
+
+  @override void dispose(){WidgetsBinding.instance.removeObserver(this);pin.dispose();confirmPin.dispose();super.dispose();}
+  @override void didChangeAppLifecycleState(AppLifecycleState state){
+    if(state==AppLifecycleState.paused || state==AppLifecycleState.hidden){deviceUnlock.background(DateTime.now());}
+    if(state==AppLifecycleState.resumed && deviceUnlock.resume(DateTime.now()) && unlocked){
+      Navigator.of(context).popUntil((route)=>route.isFirst);
+      setState((){unlocked=false;pin.clear();});
+      _load();
+    }
+  }
+  Future<void> biometricUnlock() async {
+    if(authenticating)return;
+    setState(()=>authenticating=true);
+    final ok=await deviceUnlock.biometricUnlock();
+    if(!mounted)return;
+    setState((){authenticating=false;if(ok){unlocked=true;pin.clear();}});
+    if(!ok)showError(context,'Chưa xác thực được. Anh có thể thử lại hoặc nhập mã PIN.');
+  }
   final pin = TextEditingController();
   final confirmPin = TextEditingController();
   String? savedPin;
@@ -162,10 +183,12 @@ class _PinGateState extends State<PinGate> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
   }
 
   Future<void> _load() async {
+    biometrics=await StoreDb.instance.getSetting('biometric_enabled')=='1';
     savedPin = await StoreDb.instance.getSetting('pin');
     if (mounted) setState(() => loading = false);
   }
@@ -259,8 +282,11 @@ class _PinGateState extends State<PinGate> {
                     ),
                   ],
                   const SizedBox(height: 16),
+                  if(!creating && biometrics) OutlinedButton.icon(
+                    onPressed:authenticating?null:biometricUnlock,
+                    icon:const Icon(Icons.fingerprint),label:const Text('Mở khóa bằng sinh trắc học')),
                   FilledButton.icon(
-                    onPressed: creating ? _createPin : _unlock,
+                    onPressed: authenticating ? null : creating ? _createPin : _unlock,
                     icon: Icon(
                       creating ? Icons.check_circle_outline : Icons.login,
                     ),
@@ -290,9 +316,11 @@ class _PinGateState extends State<PinGate> {
       });
   }
 
-  void _unlock() {
-    if (pin.text != savedPin) return showError(context, 'Mã PIN không đúng');
-    setState(() => unlocked = true);
+  Future<void> _unlock() async {
+    final valid=await deviceUnlock.checkPin(pin.text);
+    if(!mounted)return;
+    if(!valid)return showError(context,'Mã PIN không đúng');
+    setState((){unlocked=true;pin.clear();});
   }
 }
 
@@ -371,9 +399,18 @@ class _HomeShellState extends State<HomeShell> {
     const labels=['Tổng quan','Hàng hóa','Bán hàng','Hóa đơn','Nhiều hơn'];
     const icons=[Icons.insights_outlined,Icons.inventory_2_outlined,Icons.shopping_bag_outlined,Icons.receipt_long_outlined,Icons.menu];
     return Scaffold(body:SafeArea(child:Column(children:[
+      if(!kIsWeb) ValueListenableBuilder<int>(valueListenable:StoreDb.instance.remoteChanges,builder:(context,_,child)=>StoreDb.instance._nativeStale?Material(color:const Color(0xffffefce),child:Padding(padding:const EdgeInsets.all(12),child:Wrap(crossAxisAlignment:WrapCrossAlignment.center,children:[
+        const Text('Dữ liệu đã thay đổi trên máy tính.'),
+        TextButton(onPressed:()async {
+          if(!await confirm(context,'Tải lại dữ liệu','Dữ liệu mới sẽ được tải từ kho. Nội dung đang nhập chưa lưu sẽ được bỏ. Tiếp tục?'))return;
+          if(!mounted)return;
+          StoreDb.instance.acknowledgeRemoteChanges();refresh();
+        },child:const Text('Tải lại dữ liệu')),
+      ]))):const SizedBox.shrink()),
       if(kIsWeb) AnimatedBuilder(animation:remoteBridge,builder:(context,_)=>Material(color:remoteBridge.connected?const Color(0xffe8f3fc):const Color(0xffffe4e4),child:Padding(padding:const EdgeInsets.symmetric(horizontal:16,vertical:8),child:Wrap(crossAxisAlignment:WrapCrossAlignment.center,spacing:12,children:[
         Icon(remoteBridge.connected?Icons.wifi:Icons.wifi_off,size:18),
         Text(remoteBridge.message??(remoteBridge.connected?'Đang dùng dữ liệu trên điện thoại':'Mất kết nối điện thoại')),
+        if(!remoteBridge.connected) TextButton(onPressed:(){remoteBridge.disconnect();Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder:(_)=>const PairGate()),(_)=>false);},child:const Text('Ghép nối lại')),
         if(remoteBridge.pending!=null) TextButton(onPressed:remoteBridge.busy?null:()async{try{await remoteBridge.resolvePending();}catch(e){if(context.mounted)showError(context,e.toString());}},child:const Text('Kiểm tra giao dịch')),
         TextButton.icon(onPressed:remoteBridge.pending!=null?null:()async{await remoteBridge.poll();if(remoteBridge.connected)refresh();},icon:const Icon(Icons.refresh),label:const Text('Tải lại dữ liệu')),
       ])))),
@@ -3995,6 +4032,7 @@ class MorePage extends StatelessWidget {
           );
           onChanged();
         }),
+        if(!kIsWeb) MenuAction(Icons.fingerprint,'Mở khóa sinh trắc học',()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>const BiometricSettingsPage()))),
         if(!kIsWeb) MenuAction(
           Icons.password,
           'Đổi mã PIN',
@@ -8082,13 +8120,13 @@ class _BackupPageState extends State<BackupPage> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Ứng dụng sẽ sao chép toàn bộ kho, hóa đơn, bảo hành, sửa chữa và sổ quỹ vào bộ nhớ tạm. Hãy dán nội dung đó vào Ghi chú hoặc một tệp riêng để cất giữ.',
+                  kIsWeb ? 'Tải bản sao lưu JSON về máy tính. Cất giữ tệp này để khôi phục kho, hóa đơn, công nợ và lịch sử khi cần.' : 'Ứng dụng sẽ sao chép toàn bộ kho, hóa đơn, bảo hành, sửa chữa và sổ quỹ vào bộ nhớ tạm. Hãy dán nội dung đó vào Ghi chú hoặc một tệp riêng để cất giữ.',
                 ),
                 const SizedBox(height: 14),
                 FilledButton.icon(
                   onPressed: busy ? null : backup,
                   icon: const Icon(Icons.copy_all),
-                  label: const Text('Sao chép bản sao lưu'),
+                  label: const Text(kIsWeb ? 'Tải bản sao lưu' : 'Sao chép bản sao lưu'),
                 ),
               ],
             ),
@@ -8136,6 +8174,12 @@ class _BackupPageState extends State<BackupPage> {
     setState(() => busy = true);
     try {
       final data = await StoreDb.instance.exportBackup();
+      if(kIsWeb) {
+        if(mounted) await showDialog<void>(context:context,builder:(ctx)=>AlertDialog(
+          title:const Text('Bản sao lưu đã sẵn sàng'),content:const Text('Bấm tải tệp JSON. Khi cần khôi phục, mở tệp và dán toàn bộ nội dung vào ô khôi phục.'),
+          actions:[FilledButton(onPressed:(){browserDownloadBackup(data,'MinhCanh-backup-${DateTime.now().millisecondsSinceEpoch}.json');Navigator.pop(ctx);},child:const Text('Tải tệp JSON'))]));
+        return;
+      }
       await Clipboard.setData(ClipboardData(text: data));
       if (mounted) {
         await showDialog(
@@ -8156,8 +8200,7 @@ class _BackupPageState extends State<BackupPage> {
       }
     } catch (e) {
       if (mounted) showError(context, e);
-    }
-    if (mounted) setState(() => busy = false);
+    } finally {if(mounted)setState(()=>busy=false);}
   }
 
   Future<void> restore() async {

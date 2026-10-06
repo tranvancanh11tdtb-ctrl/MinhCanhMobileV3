@@ -59,7 +59,16 @@ class LanHost {
          final token=pairing.exchange(body['code'] as String? ?? '',req.connectionInfo?.remoteAddress.address??'unknown');
          res.write(jsonEncode({'token':token}));
        }else if(req.uri.path=='/api/call'){
-         res.write(jsonEncode(await handler(body)));
+         Map<String,Object?> result;
+         try { result=await handler(body); }
+         catch(e) {
+           // The handler returns only after its SQLite transaction commits;
+           // a thrown transaction is rolled back before this response.
+           res.statusCode=400;
+           res.write(jsonEncode({'code':'not_committed','error':e is StateError?e.message.toString():'Không lưu được giao dịch. Kiểm tra dữ liệu và thử lại.'}));
+           return;
+         }
+         res.write(jsonEncode(result));
        }else{res.statusCode=404;res.write(jsonEncode({'error':'Không có chức năng này'}));}
      }else{
        if(req.method!='GET'&&req.method!='HEAD'){res.statusCode=405;return;}
