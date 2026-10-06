@@ -1711,7 +1711,13 @@ class StoreDb {
       throw Exception('Loại công nợ không hợp lệ');
     }
     if (amount <= 0) throw Exception('Số tiền phải lớn hơn 0');
-    if (!increase && amount > currentDebt) {
+    final parties = partyType == 'customer'
+        ? await _localCustomers()
+        : await _localSuppliers();
+    final matches = parties.where((row) => row['id'] == partyId);
+    if (matches.isEmpty) throw Exception('Không tìm thấy đối tượng công nợ');
+    final actualDebt = matches.single['debt'] as int;
+    if (!increase && amount > actualDebt) {
       throw Exception('Số tiền giảm không được lớn hơn công nợ hiện tại');
     }
     final db = await _executor;
@@ -2742,12 +2748,12 @@ class StoreDb {
       Object? value;
       if(operation=='exportBackup') {
         final backup=jsonDecode(await _localExportBackup()) as Map<String,dynamic>;
-        backup['app_settings']=(backup['app_settings'] as List).where((r)=>!['pin','biometric_enabled'].contains(r['key'])).toList();
+        backup['app_settings']=(backup['app_settings'] as List).where((r)=>!['pin','biometric_enabled'].contains(r['setting_key'])).toList();
         value=jsonEncode(backup);
       } else if(operation=='restoreBackup') {
         final backup=jsonDecode(args['source'] as String) as Map<String,dynamic>;
-        final secure=await txn.query('app_settings',where:'key IN (?, ?)',whereArgs:['pin','biometric_enabled']);
-        backup['app_settings']=[...(backup['app_settings'] as List? ?? []).where((r)=>!['pin','biometric_enabled'].contains(r['key'])),...secure];
+        final secure=await txn.query('app_settings',where:'setting_key IN (?, ?)',whereArgs:['pin','biometric_enabled']);
+        backup['app_settings']=[...(backup['app_settings'] as List? ?? []).where((r)=>!['pin','biometric_enabled'].contains(r['setting_key'])),...secure];
         await txn.execute('CREATE TABLE IF NOT EXISTS restore_safety(id INTEGER PRIMARY KEY, source TEXT NOT NULL)');
         await txn.insert('restore_safety',{'id':1,'source':await _localExportBackup()},conflictAlgorithm:ConflictAlgorithm.replace);
         await _localRestoreBackup(jsonEncode(backup));
@@ -2833,4 +2839,3 @@ case 'dashboard': return dashboard();
     }
   }
 }
-
