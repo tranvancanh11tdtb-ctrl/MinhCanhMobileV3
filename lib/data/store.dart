@@ -2077,6 +2077,9 @@ class StoreDb {
         await _createV6Tables(txn);
         await _createV7Tables(txn);
         if((await txn.rawQuery('PRAGMA foreign_key_check')).isNotEmpty)throw Exception('Bản sao lưu có dữ liệu liên kết không hợp lệ');
+        // Restoring replaces business state: old success receipts no longer
+        // prove that their effects exist. The monotonic revision rejects retries.
+        await txn.delete('lan_requests');
       });
   }
 

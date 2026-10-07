@@ -459,11 +459,24 @@ class _ProductReportPageState extends State<ProductReportPage> {
 
   Widget _row(Map<String, Object?> r, String key, num? max) => InkWell(
     onTap: () async {
+      Map<String, Object?> product;
+      try {
+        // Report rows contain aggregates, not the complete editable product.
+        product = await StoreDb.instance.product(r['id'] as int);
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Không tải được hàng hóa. Hãy tải lại báo cáo và thử lại.')),
+          );
+        }
+        return;
+      }
+      if (!mounted) return;
       await Navigator.push(
         context,
         MaterialPageRoute(
           builder: (_) =>
-              ProductDetail(product: r, onChanged: () {}),
+              ProductDetail(product: product, onChanged: () {}),
         ),
       );
       if (mounted) setState(() => future = _load());

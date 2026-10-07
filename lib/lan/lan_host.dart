@@ -19,7 +19,8 @@ class LanHost {
    if(ips.isEmpty)throw StateError('Hãy kết nối Wi-Fi cửa hàng trước.');
    // Verify packaged desktop entry before starting an advertised service.
    await rootBundle.load('assets/desktop/index.html');
-   final server=await HttpServer.bind(InternetAddress.anyIPv4,0);
+   // Keep the browser origin (and its pending request storage) across restarts.
+   final server=await HttpServer.bind(InternetAddress.anyIPv4,8311);
    _server=server;addresses..clear()..addAll(ips.map((ip)=>'http://$ip:${server.port}'));
    pairing.newCode();
    channel.setMethodCallHandler((call) async {if(call.method=='stopped')await _close();});

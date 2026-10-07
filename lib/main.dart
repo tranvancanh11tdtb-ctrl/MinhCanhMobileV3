@@ -9085,7 +9085,7 @@ class ReceiptPrinter {
     ReceiptDocument receipt,
   ) async {
     final controller = ScreenshotController();
-    return controller.captureFromWidget(
+    return controller.captureFromLongWidget(
       InheritedTheme.captureAll(
         context,
         Material(
@@ -9099,6 +9099,7 @@ class ReceiptPrinter {
       ),
       delay: const Duration(milliseconds: 80),
       pixelRatio: 2,
+      constraints: const BoxConstraints(minWidth: 360, maxWidth: 360),
     );
   }
 

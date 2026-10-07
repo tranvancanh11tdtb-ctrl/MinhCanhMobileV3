@@ -58,6 +58,8 @@ void main() {
     await tester.pumpAndSettle();
     final row=find.text('Report detail product').first;
     await tester.ensureVisible(row);
+    await tester.pumpAndSettle();
+    expect(row.hitTestable(), findsOneWidget);
     await tester.runAsync(() async {
       await tester.tap(row);
       await store.products();
