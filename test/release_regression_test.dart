@@ -31,7 +31,7 @@ void main() {
       await bridge.resolvePending();
       expect(bridge.pending,isNull);
       bridge.disconnect();
-    },()=>MockClient((_) async => http.Response(jsonEncode({'error':'Dữ liệu đã thay đổi','code':'not_committed'}),400)));
+    },()=>MockClient((_) async => http.Response(jsonEncode({'error':'Dữ liệu đã thay đổi','code':'not_committed'}),400,headers:{'content-type':'application/json; charset=utf-8'})));
   });
   test('expired authentication does not discard uncertain write', () async {
     await http.runWithClient(() async {
@@ -41,7 +41,7 @@ void main() {
       expect(bridge.pending,isNotNull);
       expect(bridge.connected,isFalse);
       bridge.disconnect();
-    },()=>MockClient((_) async => http.Response(jsonEncode({'error':'Phiên hết hạn'}),401)));
+    },()=>MockClient((_) async => http.Response(jsonEncode({'error':'Phiên hết hạn'}),401,headers:{'content-type':'application/json; charset=utf-8'})));
   });
   test('incomplete restore is rejected without erasing store', () async {
     final before=await store.exportBackup();
@@ -70,8 +70,12 @@ void main() {
     expect((await store.productBrands()).any((r)=>r['name']=='Điện thoại mới'),true);
   });
   testWidgets('enabled biometric unlock has an explicit action and PIN fallback', (tester) async {
-    await tester.pumpWidget(const MaterialApp(home:PinGate()));
-    await tester.runAsync(() async { await Future<void>.delayed(const Duration(milliseconds:150)); });
+    // SQLite uses a real isolate; launch and drain its reads in the real zone.
+    await tester.runAsync(() async {
+      await tester.pumpWidget(const MaterialApp(home:PinGate()));
+      await store.getSetting('biometric_enabled');
+      await store.getSetting('pin');
+    });
     await tester.pumpAndSettle();
     expect(find.text('Mở khóa bằng sinh trắc học'),findsOneWidget);
     expect(find.widgetWithText(TextField,'Mã PIN'),findsOneWidget);
