@@ -131,10 +131,10 @@ void main() {
   test('format 7 preserves draft and recurring payment identity',()async{
     final id=await store.savePurchaseDraft(payload:{'supplier':'Roundtrip','items':[]});
     final template=await store.saveRecurringExpense(payload:{'title':'Rent backup','amount':1000,'scope':'business','day':31,'start_month':'2026-10','active':true});
-    final cash=await store.payRecurringExpense(template,2026,10);
+    final cash=await store.payRecurringExpense(template,2026,10,'cash','2026-10-09T10:00:00');
     final source=await store.exportBackup();await store.deletePurchaseDraft(id);await store.restoreBackup(source);
     expect(((await store.purchaseDraft(id))['payload'] as Map)['supplier'],'Roundtrip');
-    expect(await store.payRecurringExpense(template,2026,10),cash);
+    expect(await store.payRecurringExpense(template,2026,10,'cash','2026-10-09T10:00:00'),cash);
   });
 
 }
