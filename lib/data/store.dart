@@ -2198,7 +2198,7 @@ class StoreDb {
     DateTime end,
   ) async {
     final db = await _executor;
-    return db.rawQuery(
+    final rows=await db.rawQuery(
       '''SELECT p.id, p.code, p.name, p.category, p.brand, p.track_imei, p.active,
       CASE WHEN p.track_imei=1 THEN
         (SELECT COUNT(*) FROM serial_units su
@@ -2226,6 +2226,7 @@ class StoreDb {
       ORDER BY revenue DESC, p.name''',
       [start.toIso8601String(), end.toIso8601String()],
     );
+    return _inventoryPeriodRows(rows,start,end);
   }
 
   Future<List<Map<String, Object?>>> _localInvoiceReport(

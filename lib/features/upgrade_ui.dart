@@ -389,11 +389,18 @@ class _ProductReportPageState extends State<ProductReportPage> {
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 10),
               child: Text(
-                'Kỳ thời gian áp dụng doanh thu, lượng bán và lợi nhuận. Tồn kho là số hiện tại.',
+                'Nhập–xuất–tồn theo kỳ đã chọn. Giá trị kho là giá trị hiện tại.',
                 style: TextStyle(color: Colors.blueGrey, fontSize: 12),
               ),
             ),
-            if (details) ...[
+            if (MediaQuery.sizeOf(context).width >= 1000) ...[
+              _inventoryTable(rows.take(visible).toList()),
+              if (rows.length > visible)
+                TextButton(
+                  onPressed: () => setState(() => visible += 50),
+                  child: const Text('Xem thêm 50 hàng hóa'),
+                ),
+            ] else if (details) ...[
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: Text('${rows.length} mẫu hàng'),
@@ -428,6 +435,74 @@ class _ProductReportPageState extends State<ProductReportPage> {
       },
     ),
   );
+  Widget _inventoryTable(List<Map<String, Object?>> rows) =>
+      SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: DataTable(
+          columnSpacing: 20,
+          dataRowMinHeight: 40,
+          dataRowMaxHeight: 50,
+          columns: const [
+            DataColumn(label: Text('Hàng hóa')),
+            DataColumn(label: Text('Tồn đầu'), numeric: true),
+            DataColumn(label: Text('Nhập'), numeric: true),
+            DataColumn(label: Text('Xuất'), numeric: true),
+            DataColumn(label: Text('Tồn cuối'), numeric: true),
+            DataColumn(label: Text('Giá trị hiện tại'), numeric: true),
+            DataColumn(label: Text('Doanh thu'), numeric: true),
+            DataColumn(label: Text('Lợi nhuận'), numeric: true),
+          ],
+          rows: rows
+              .map(
+                (r) => DataRow(
+                  cells: [
+                    DataCell(
+                      SizedBox(
+                        width: 230,
+                        child: Text(
+                          '${r['name']}\n${r['code']}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      onTap: () async {
+                        try {
+                          final product = await StoreDb.instance.product(
+                            r['id'] as int,
+                          );
+                          if (!mounted) return;
+                          await Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => ProductDetail(
+                                product: product,
+                                onChanged: () {},
+                              ),
+                            ),
+                          );
+                          if (mounted) setState(() => future = _load());
+                        } catch (e) {
+                          if (mounted) showError(context, e);
+                        }
+                      },
+                    ),
+                    ...[
+                      'opening_stock',
+                      'incoming',
+                      'outgoing',
+                      'closing_stock',
+                    ].map((k) => DataCell(Text('${r[k] ?? 0}'))),
+                    ...[
+                      'stock_value',
+                      'revenue',
+                      'profit',
+                    ].map((k) => DataCell(Text(vnd((r[k] as num?) ?? 0)))),
+                  ],
+                ),
+              )
+              .toList(),
+        ),
+      );
   Widget _ranking(List<Map<String, Object?>> rows, String key, String title) {
     final sorted = [...rows]
       ..sort((a, b) => number(b, key).compareTo(number(a, key)));
@@ -466,7 +541,11 @@ class _ProductReportPageState extends State<ProductReportPage> {
       } catch (_) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Không tải được hàng hóa. Hãy tải lại báo cáo và thử lại.')),
+            const SnackBar(
+              content: Text(
+                'Không tải được hàng hóa. Hãy tải lại báo cáo và thử lại.',
+              ),
+            ),
           );
         }
         return;
@@ -475,8 +554,7 @@ class _ProductReportPageState extends State<ProductReportPage> {
       await Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) =>
-              ProductDetail(product: product, onChanged: () {}),
+          builder: (_) => ProductDetail(product: product, onChanged: () {}),
         ),
       );
       if (mounted) setState(() => future = _load());
@@ -485,6 +563,14 @@ class _ProductReportPageState extends State<ProductReportPage> {
       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
       child: Column(
         children: [
+          if (key == metric && details)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                'Tồn đầu ${r['opening_stock'] ?? 0} • Nhập ${r['incoming'] ?? 0} • Xuất ${r['outgoing'] ?? 0} • Tồn cuối ${r['closing_stock'] ?? 0}',
+                style: const TextStyle(fontSize: 12, color: Colors.blueGrey),
+              ),
+            ),
           Row(
             children: [
               Expanded(

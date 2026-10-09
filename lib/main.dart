@@ -34,6 +34,7 @@ part 'features/finance_ui.dart';
 part 'data/store.dart';
 part 'data/purchase_drafts.dart';
 part 'data/finance_store.dart';
+part 'data/inventory_report.dart';
 part 'lan/store_codec.dart';
 part 'features/connection_ui.dart';
 
@@ -562,7 +563,7 @@ class DashboardPage extends StatelessWidget {
                 ),
               ),
               MetricCard(
-                'Số dư đã thu',
+                'Dòng tiền ròng',
                 vnd(d['fund']!),
                 Icons.savings,
                 Colors.teal,
