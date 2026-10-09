@@ -58,4 +58,18 @@ void main() {
     await store.deleteCashEntry(id);
     expect((await store.financeLedger(DateTime(2000),DateTime(2100))).any((r)=>r['source_type']=='manual'&&r['source_id']==id),false);
   });
+  test('collecting debt adds cash on collection date without extra revenue',() async {
+    final id=await store.addProduct({'code':'DEBT-PK','name':'Debt test','category':'Phụ kiện','track_imei':0,'created_at':financeNow()});
+    final line=PurchaseLineDraft(product:await store.product(id));line.cost.text='1000';
+    await store.completeMultiPurchase(items:[line],supplier:'Debt supplier',paid:0,paymentMethod:'cash');line.dispose();
+    await store.completeMultiSale(invoiceCode:'FIN-DEBT',items:[SaleLineDraft(product:await store.product(id),quantity:1,unitPrice:3000,discountPerItem:0)],customer:'Debt buyer',phone:'0910000000',cash:0,transfer:0,warrantyMonths:0);
+    final customer=(await store.customers()).singleWhere((r)=>r['customer']=='Debt buyer');
+    await store.addDebtAdjustment(partyType:'customer',partyId:customer['id'] as int,amount:1000,increase:false,currentDebt:3000,note:'Thu nợ',isPayment:true,paymentMethod:'transfer',occurredAt:'2026-11-10T10:00:00');
+    final summary=await store.financeSummary(DateTime(2026,11,10),DateTime(2026,11,11));
+    expect(summary['income'],1000);expect(summary['revenue'],0);expect(summary['business_profit'],0);
+    expect((await store.customers()).singleWhere((r)=>r['customer']=='Debt buyer')['debt'],2000);
+  });
+  test('LAN protocol mismatch rejects before mutation',() async {
+    await expectLater(store.executeRemote({'operation':'dashboard','protocol':1}),throwsStateError);
+  });
 }

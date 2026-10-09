@@ -1,7 +1,7 @@
 name: minh_canh_mobile_v3
 description: Ung dung quan ly cua hang Minh Canh Mobile, offline.
 publish_to: none
-version: 3.11.0+312
+version: 3.12.0+313
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

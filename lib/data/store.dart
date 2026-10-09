@@ -1895,7 +1895,8 @@ class StoreDb {
           : category.trim(),
       'amount': amount,
       'note': note.trim(),
-      'created_at': DateTime.now().toIso8601String(),
+      'created_at': financeNow(),
+      'occurred_at':financeNow(),
     });
   }
 
@@ -2121,6 +2122,7 @@ class StoreDb {
         await _backfillDirectories(txn);
         await _createV6Tables(txn);
         await _createV7Tables(txn);
+        await _createFinanceTables(txn);
         if((await txn.rawQuery('PRAGMA foreign_key_check')).isNotEmpty)throw Exception('Bản sao lưu có dữ liệu liên kết không hợp lệ');
         // Restoring replaces business state: old success receipts no longer
         // prove that their effects exist. The monotonic revision rejects retries.
@@ -2162,23 +2164,16 @@ class StoreDb {
         AND COALESCE(completed_at,received_at)<?''',
       [from, to],
     )).single;
-    final cash = (await db.rawQuery(
-      '''SELECT
-      COALESCE(SUM(CASE WHEN entry_type='income' THEN amount ELSE 0 END),0) other_income,
-      COALESCE(SUM(CASE WHEN entry_type='expense' THEN amount ELSE 0 END),0) expenses
-      FROM cash_entries
-      WHERE created_at>=? AND created_at<?''',
-      [from, to],
-    )).single;
+    final finance=await financeSummary(start,end);
     int n(Map<String, Object?> row, String key) =>
         (row[key] as num? ?? 0).toInt();
     final salesRevenue = n(sale, 'revenue');
     final repairRevenue = n(repair, 'revenue');
-    final grossProfit = n(sale, 'gross_profit') + n(repair, 'gross_profit');
-    final otherIncome = n(cash, 'other_income');
-    final expenses = n(cash, 'expenses');
+    final grossProfit = finance['gross_profit']!;
+    final otherIncome = finance['business_income']!;
+    final expenses = finance['business_expenses']!;
     return {
-      'revenue': salesRevenue + repairRevenue,
+      'revenue': finance['revenue']!,
       'sales_revenue': salesRevenue,
       'repair_revenue': repairRevenue,
       'gross_profit': grossProfit,
@@ -2327,10 +2322,7 @@ class StoreDb {
       COALESCE(SUM(CASE WHEN status!='cancelled' THEN paid ELSE 0 END),0) fund,
       COALESCE(SUM(CASE WHEN status NOT IN ('completed','returned','cancelled') THEN 1 ELSE 0 END),0) pending
       FROM repairs''');
-    final cashRows = await db.rawQuery('''SELECT
-      COALESCE(SUM(CASE WHEN entry_type='income' THEN amount ELSE 0 END),0) income,
-      COALESCE(SUM(CASE WHEN entry_type='expense' THEN amount ELSE 0 END),0) expense
-      FROM cash_entries''');
+    final finance=await financeSummary(DateTime(2000),DateTime(2100));
     final debtAdjustmentRows = await db.rawQuery('''SELECT
       COALESCE(SUM(amount_delta),0) amount
       FROM debt_adjustments WHERE party_type='customer' ''');
@@ -2344,19 +2336,15 @@ class StoreDb {
         (row[key] as num? ?? 0).toInt();
     final sale = salesRows.single;
     final repair = repairRows.single;
-    final cash = cashRows.single;
+
     return {
       'revenue': n(sale, 'revenue') + n(repair, 'revenue'),
-      'profit': n(sale, 'profit') + n(repair, 'profit'),
+      'profit': finance['business_profit']!,
       'debt':
           n(sale, 'debt') +
           n(repair, 'debt') +
           n(debtAdjustmentRows.single, 'amount'),
-      'fund':
-          n(sale, 'fund') +
-          n(repair, 'fund') +
-          n(cash, 'income') -
-          n(cash, 'expense'),
+      'fund': finance['cash_flow']!,
       'invoices': n(sale, 'invoices'),
       'pending_repairs': n(repair, 'pending'),
       'stock_value': n(stockRows.single, 'stock_value'),

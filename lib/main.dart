@@ -29,6 +29,8 @@ import 'features/device_unlock.dart';
 
 part 'features/upgrade_ui.dart';
 part 'features/purchase_ui.dart';
+part 'features/customer_picker.dart';
+part 'features/finance_ui.dart';
 part 'data/store.dart';
 part 'data/purchase_drafts.dart';
 part 'data/finance_store.dart';
@@ -2226,10 +2228,11 @@ class _SalePageState extends State<SalePage> {
       );
 
   Future<void> _loadCustomers({int? selectId}) async {
-    final rows = await StoreDb.instance.customerDirectory();
+    final raw = await StoreDb.instance.customers();
+    final rows=raw.map((r)=>{...r,'name':r['customer']??r['name']}).toList();
     if (!mounted) return;
     setState(() {
-      customers = rows;
+      customers=rows;
       if (selectId != null) {
         selectedCustomerId = selectId;
         final selected = rows.where((row) => row['id'] == selectId);
@@ -2776,34 +2779,7 @@ class _SalePageState extends State<SalePage> {
                   ),
                 ),
                 const SizedBox(height: 14),
-                DropdownButtonFormField<int>(
-                  key: ValueKey(
-                    'customer-$selectedCustomerId-${customers.length}',
-                  ),
-                  initialValue: selectedCustomerId,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Khách hàng',
-                    prefixIcon: Icon(Icons.person),
-                  ),
-                  items: [
-                    const DropdownMenuItem(value: 0, child: Text('Khách lẻ')),
-                    ...customers.map(
-                      (row) => DropdownMenuItem(
-                        value: row['id'] as int,
-                        child: Text(
-                          '${row['name']}'
-                          '${'${row['phone']}'.trim().isEmpty ? '' : ' • ${row['phone']}'}',
-                        ),
-                      ),
-                    ),
-                    const DropdownMenuItem(
-                      value: -1,
-                      child: Text('+ Thêm khách hàng mới'),
-                    ),
-                  ],
-                  onChanged: _pickCustomer,
-                ),
+                CustomerSearchPicker(rows:customers,selectedId:selectedCustomerId,onSelected:_pickCustomer),
                 if (selectedCustomerId > 0) ...[
                   const SizedBox(height: 8),
                   Text(
@@ -7387,227 +7363,6 @@ class _WarrantyDetailPageState extends State<WarrantyDetailPage> {
     try {
       await StoreDb.instance.deleteWarrantyClaim(claim['id'] as int);
       if (mounted) setState(() {});
-    } catch (e) {
-      if (mounted) showError(context, e);
-    }
-  }
-}
-
-class CashBookPage extends StatefulWidget {
-  const CashBookPage({super.key});
-  @override
-  State<CashBookPage> createState() => _CashBookPageState();
-}
-
-class _CashBookPageState extends State<CashBookPage> {
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Sổ quỹ')),
-    floatingActionButton: FloatingActionButton.extended(
-      onPressed: add,
-      icon: const Icon(Icons.add),
-      label: const Text('Thêm thu/chi'),
-    ),
-    body: FutureBuilder<List<Map<String, Object?>>>(
-      future: StoreDb.instance.cashEntries(),
-      builder: (context, snap) {
-        if (!snap.hasData)
-          return const Center(child: CircularProgressIndicator());
-        final rows = snap.data!;
-        final income = rows
-            .where((r) => r['entry_type'] == 'income')
-            .fold<int>(0, (sum, r) => sum + (r['amount'] as int));
-        final expense = rows
-            .where((r) => r['entry_type'] == 'expense')
-            .fold<int>(0, (sum, r) => sum + (r['amount'] as int));
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
-          children: [
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('Tổng thu khác'),
-                          Text(
-                            vnd(income),
-                            style: const TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.green,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          const Text('Tổng chi'),
-                          Text(
-                            vnd(expense),
-                            style: const TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.red,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            if (rows.isEmpty)
-              const Padding(
-                padding: EdgeInsets.all(24),
-                child: Text('Chưa có khoản thu/chi riêng.'),
-              ),
-            ...rows.map((r) {
-              final isIncome = r['entry_type'] == 'income';
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Card(
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: isIncome
-                          ? Colors.green.shade50
-                          : Colors.red.shade50,
-                      child: Icon(
-                        isIncome ? Icons.south_west : Icons.north_east,
-                        color: isIncome ? Colors.green : Colors.red,
-                      ),
-                    ),
-                    title: Text(
-                      '${r['category']}',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    subtitle: Text(
-                      '${formatDateTime(r['created_at'])}${'${r['note']}'.trim().isEmpty ? '' : '\n${r['note']}'}',
-                    ),
-                    isThreeLine: '${r['note']}'.trim().isNotEmpty,
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '${isIncome ? '+' : '-'}${vnd(r['amount'] as int)}',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: isIncome ? Colors.green : Colors.red,
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.delete_outline),
-                          onPressed: () => remove(r['id'] as int),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            }),
-          ],
-        );
-      },
-    ),
-  );
-
-  Future<void> add() async {
-    final changed = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => const CashEntryForm()),
-    );
-    if (changed == true && mounted) setState(() {});
-  }
-
-  Future<void> remove(int id) async {
-    if (!await confirm(
-      context,
-      'Xóa khoản thu/chi',
-      'Bạn có chắc muốn xóa mục này khỏi sổ quỹ?',
-    ))
-      return;
-    await StoreDb.instance.deleteCashEntry(id);
-    if (mounted) setState(() {});
-  }
-}
-
-class CashEntryForm extends StatefulWidget {
-  const CashEntryForm({super.key});
-  @override
-  State<CashEntryForm> createState() => _CashEntryFormState();
-}
-
-class _CashEntryFormState extends State<CashEntryForm> {
-  String type = 'expense';
-  final category = TextEditingController();
-  final amount = TextEditingController();
-  final note = TextEditingController();
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Thêm khoản thu/chi')),
-    body: ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(
-              value: 'income',
-              label: Text('Thu'),
-              icon: Icon(Icons.south_west),
-            ),
-            ButtonSegment(
-              value: 'expense',
-              label: Text('Chi'),
-              icon: Icon(Icons.north_east),
-            ),
-          ],
-          selected: {type},
-          onSelectionChanged: (value) => setState(() => type = value.first),
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: category,
-          decoration: const InputDecoration(labelText: 'Nhóm thu/chi'),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: amount,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(labelText: 'Số tiền *'),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: note,
-          maxLines: 3,
-          decoration: const InputDecoration(labelText: 'Ghi chú'),
-        ),
-        const SizedBox(height: 20),
-        FilledButton.icon(
-          onPressed: save,
-          icon: const Icon(Icons.save),
-          label: const Text('Lưu vào sổ quỹ'),
-        ),
-      ],
-    ),
-  );
-
-  Future<void> save() async {
-    try {
-      await StoreDb.instance.addCashEntry(
-        type: type,
-        category: category.text,
-        amount: int.tryParse(amount.text) ?? 0,
-        note: note.text,
-      );
-      if (mounted) Navigator.pop(context, true);
     } catch (e) {
       if (mounted) showError(context, e);
     }

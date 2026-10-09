@@ -104,7 +104,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
 Future<void> offerBrowserPdf(BuildContext context,Uint8List bytes,String name) async {
   await showDialog<void>(context:context,builder:(ctx)=>AlertDialog(
     title:const Text('Bản in đã sẵn sàng'),
-    content:const Text('Tải PDF, mở tệp và chọn In. Đặt đúng khổ giấy, tỷ lệ 100%: tem 40×30 mm hoặc hóa đơn 80 mm.'),
-    actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Đóng')),FilledButton(onPressed:(){browserOpenPdf(bytes,name);Navigator.pop(ctx);},child:const Text('Tải PDF để in'))],
+    content:const Text('Bấm In để chọn máy in. Đặt tỷ lệ 100%, tem 40×30 mm hoặc hóa đơn 80 mm.'),
+    actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Đóng')),TextButton(onPressed:(){browserOpenPdf(bytes,name);},child:const Text('Tải PDF')),FilledButton(onPressed:(){try{browserPrintPdf(bytes,name);Navigator.pop(ctx);}catch(e){showError(ctx,e);}},child:const Text('In / chọn máy in'))],
   ));
 }
