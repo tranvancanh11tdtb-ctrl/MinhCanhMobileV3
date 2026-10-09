@@ -14,7 +14,7 @@ class StoreDb {
     final file = p.join(await getDatabasesPath(), 'minh_canh_mobile_v3.db');
     return openDatabase(
       file,
-      version: 8,
+      version: 9,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -107,6 +107,7 @@ class StoreDb {
         await _createV6Tables(db);
         await _createV7Tables(db);
         await _createV8Tables(db);
+        await _createV9Tables(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) await _createV2Tables(db);
@@ -116,6 +117,7 @@ class StoreDb {
         if (oldVersion < 6) await _createV6Tables(db);
         if (oldVersion < 7) await _createV7Tables(db);
         if(oldVersion<8) await _createV8Tables(db);
+        if(oldVersion<9) await _createV9Tables(db);
       },
     );
   }
@@ -846,9 +848,25 @@ class StoreDb {
     required String supplier,
     required int paid,
     required String paymentMethod,
+    int? draftId, String? completionKey,
   }) async {
     if (items.isEmpty) throw Exception('Hãy thêm ít nhất một sản phẩm');
     return _nestedTransaction((txn) async {
+      final fingerprint = sha256.convert(utf8.encode(jsonEncode({
+        'items': items.map(_encodeDraft).toList(), 'supplier': supplier,
+        'paid': paid, 'paymentMethod': paymentMethod, 'draftId': draftId,
+      }))).toString();
+      if (completionKey != null) {
+        if (completionKey.trim().isEmpty) throw ArgumentError('Mã hoàn thành rỗng');
+        final prior = await txn.query('purchase_completions', where:'completion_key=?', whereArgs:[completionKey]);
+        if (prior.isNotEmpty) {
+          if(prior.single['payload_hash'] != fingerprint) throw StateError('Mã hoàn thành đã dùng cho phiếu khác');
+          return prior.single['purchase_id'] as int;
+        }
+      }
+      if (draftId != null && (await txn.query('purchase_drafts',where:'id=?',whereArgs:[draftId])).isEmpty) {
+        throw StateError('Phiếu tạm không còn tồn tại');
+      }
       final prepared = <Map<String, Object?>>[];
       final allImeis = <String>[];
       final productIds = <int>{};
@@ -890,7 +908,8 @@ class StoreDb {
           }
           allImeis.addAll(imeis);
         }
-        final lineTotal = quantity * item.netUnitCost;
+        if (item.serials.any((serial) => serial.cost < 0)) throw Exception('Giá vốn từng máy không hợp lệ');
+        final lineTotal = item.total;
         purchaseTotal += lineTotal;
         prepared.add({
           'draft': item,
@@ -898,7 +917,7 @@ class StoreDb {
           'product_id': productId,
           'tracks': tracks,
           'quantity': quantity,
-          'unit_cost': item.netUnitCost,
+          'unit_cost': (lineTotal / quantity).round(),
         });
       }
 
@@ -956,7 +975,7 @@ class StoreDb {
               'condition_text': serial.conditionText.trim().isEmpty
                   ? 'Mới'
                   : serial.conditionText.trim(),
-              'cost': unitCost,
+              'cost': serial.cost > 0 ? serial.cost : item.netUnitCost,
               'purchase_id': purchaseId,
               'created_at': now,
             });
@@ -992,6 +1011,10 @@ class StoreDb {
           });
         }
       }
+      if (draftId != null) await txn.delete('purchase_drafts',where:'id=?',whereArgs:[draftId]);
+      if (completionKey != null) await txn.insert('purchase_completions',{
+        'completion_key':completionKey,'purchase_id':purchaseId,'payload_hash':fingerprint,
+      });
       return purchaseId;
     });
   }
@@ -1768,6 +1791,7 @@ class StoreDb {
         'amount': amount,
         'parts_cost': partsCost,
         'paid': paid,
+        'initial_paid':paid,
         'status': 'received',
         'note': note.trim(),
         'received_at': now.toIso8601String(),
@@ -1817,6 +1841,9 @@ class StoreDb {
     }
     await _nestedTransaction((txn) async {
       await _ensureCustomer(txn, customer, phone);
+      final old=(await txn.query('repairs',where:'id=?',whereArgs:[id])).single;
+      final delta=paid-(old['paid'] as int);
+      if(delta!=0) await txn.insert('payment_events',{'source_type':'repair','source_id':id,'entry_type':delta>0?'income':'expense','amount':delta.abs(),'payment_method':'unknown','occurred_at':financeNow(),'note':'Thanh toán sửa chữa ${old['code']}'});
       final updated = await txn.update(
         'repairs',
         {
@@ -1874,6 +1901,7 @@ class StoreDb {
 
   Future<void> _localDeleteCashEntry(int id) async {
     final db = await _executor;
+    if((await db.query('recurring_payments',where:'cash_entry_id=?',whereArgs:[id])).isNotEmpty)throw StateError('Khoản định kỳ đã thanh toán không xóa tại sổ quỹ');
     await db.delete('cash_entries', where: 'id=?', whereArgs: [id]);
   }
 
@@ -1993,10 +2021,15 @@ class StoreDb {
       'product_categories',
       'product_brands',
       'app_settings',
+      'purchase_drafts',
+      'purchase_completions',
+      'recurring_expenses',
+      'payment_events',
+      'recurring_payments',
     ];
     final data = <String, Object?>{
       'app': 'MinhCanhMobileV3',
-      'backup_version': 6,
+      'backup_version': 7,
       'created_at': DateTime.now().toIso8601String(),
     };
     for (final table in tables) {
@@ -2011,6 +2044,11 @@ class StoreDb {
       throw Exception('Nội dung sao lưu không đúng của Minh Cảnh Mobile V3');
     }
     const deleteOrder = [
+      'recurring_payments',
+      'recurring_expenses',
+      'payment_events',
+      'purchase_completions',
+      'purchase_drafts',
       'warranty_claims',
       'stocktakes',
       'cash_entries',
@@ -2047,8 +2085,15 @@ class StoreDb {
       'product_categories',
       'product_brands',
       'app_settings',
+      'purchase_drafts',
+      'purchase_completions',
+      'recurring_expenses',
+      'payment_events',
+      'recurring_payments',
     ];
-    if(decoded['backup_version']!=6)throw Exception('Phiên bản sao lưu chưa được hỗ trợ');
+    if(decoded['backup_version']==6) { decoded['purchase_drafts']=[]; decoded['purchase_completions']=[]; decoded['recurring_expenses']=[]; decoded['recurring_payments']=[]; decoded['payment_events']=[];
+      for(final row in decoded['repairs'] as List? ?? []) { if(row is Map) row['initial_paid']=row['paid']??0; } }
+    if(decoded['backup_version']!=6 && decoded['backup_version']!=7)throw Exception('Phiên bản sao lưu chưa được hỗ trợ');
     for(final table in insertOrder){
       final rows=decoded[table];
       if(rows is! List || rows.any((row)=>row is! Map))throw Exception('Bản sao lưu thiếu hoặc hỏng bảng $table');
@@ -2434,9 +2479,10 @@ class StoreDb {
     required String supplier,
     required int paid,
     required String paymentMethod,
+    int? draftId, String? completionKey,
   }) async {
-    if(kIsWeb) { final value=await remoteBridge.call('completeMultiPurchase',{'items':items.map(_encodeDraft).toList(),'supplier':supplier,'paid':paid,'paymentMethod':paymentMethod},write:true); return value as int; }
-    return _callLocal<int>(()=>_localCompleteMultiPurchase(items: items, supplier: supplier, paid: paid, paymentMethod: paymentMethod), write:true);
+    if(kIsWeb) { final value=await remoteBridge.call('completeMultiPurchase',{'items':items.map(_encodeDraft).toList(),'supplier':supplier,'paid':paid,'paymentMethod':paymentMethod,'draftId':draftId,'completionKey':completionKey},write:true); return value as int; }
+    return _callLocal<int>(()=>_localCompleteMultiPurchase(items: items, supplier: supplier, paid: paid, paymentMethod: paymentMethod, draftId:draftId, completionKey:completionKey), write:true);
   }
   Future<int> completeMultiSale({
     required String invoiceCode,
@@ -2713,7 +2759,7 @@ class StoreDb {
     return _callLocal<Map<String, int>>(()=>_localDashboard(), write:false);
   }
   static final Object _transactionKey=Object();
-  static const writeOperations=<String>{'addProductCategory','renameProductCategory','deleteProductCategory','addProductBrand','renameProductBrand','deleteProductBrand','addProduct','updateProduct','setProductActive','deleteProduct','updateSerialUnit','completePurchase','completeMultiPurchase','completeMultiSale','cancelSale','deleteSale','setSetting','addWarrantyClaim','updateWarrantyClaimStatus','updateWarrantyClaim','deleteWarrantyClaim','addCustomerDirectory','updateCustomerDirectory','addSupplierDirectory','updateSupplierDirectory','addDebtAdjustment','addRepair','updateRepairStatus','updateRepair','deleteRepair','addCashEntry','deleteCashEntry','recordStocktake','inventoryAction','restoreBackup'};
+  static const writeOperations=<String>{'saveCashEntry','saveRecurringExpense','payRecurringExpense','deleteRecurringExpense','savePurchaseDraft','deletePurchaseDraft','addProductCategory','renameProductCategory','deleteProductCategory','addProductBrand','renameProductBrand','deleteProductBrand','addProduct','updateProduct','setProductActive','deleteProduct','updateSerialUnit','completePurchase','completeMultiPurchase','completeMultiSale','cancelSale','deleteSale','setSetting','addWarrantyClaim','updateWarrantyClaimStatus','updateWarrantyClaim','deleteWarrantyClaim','addCustomerDirectory','updateCustomerDirectory','addSupplierDirectory','updateSupplierDirectory','addDebtAdjustment','addRepair','updateRepairStatus','updateRepair','deleteRepair','addCashEntry','deleteCashEntry','recordStocktake','inventoryAction','restoreBackup'};
   Future<DatabaseExecutor> get _executor async => Zone.current[_transactionKey] as DatabaseExecutor? ?? await database;
   Future<T> _nestedTransaction<T>(Future<T> Function(DatabaseExecutor) body) async {
     final current=Zone.current[_transactionKey] as DatabaseExecutor?;
@@ -2802,7 +2848,11 @@ case 'serials': return serials((args['productId'] as int), status: (args['status
 case 'serialExists': return serialExists((args['imei'] as String));
 case 'updateSerialUnit': await updateSerialUnit(id: (args['id'] as int), imei: (args['imei'] as String), color: (args['color'] as String), conditionText: (args['conditionText'] as String), cost: (args['cost'] as int)); return null;
 case 'completePurchase': return completePurchase(productId: (args['productId'] as int), quantity: (args['quantity'] as int), unitCost: (args['unitCost'] as int), supplier: (args['supplier'] as String), paid: (args['paid'] as int), paymentMethod: (args['paymentMethod'] as String), serials: (args['serials'] as List).map((v)=>_decodeSerialDraft(Map<String,Object?>.from(v as Map))).toList());
-case 'completeMultiPurchase': return completeMultiPurchase(items: (args['items'] as List).map((v)=>_decodePurchaseLineDraft(Map<String,Object?>.from(v as Map))).toList(), supplier: (args['supplier'] as String), paid: (args['paid'] as int), paymentMethod: (args['paymentMethod'] as String));
+case 'savePurchaseDraft': return savePurchaseDraft(id:args['id'] as int?,payload:Map<String,Object?>.from(args['payload'] as Map));
+case 'purchaseDrafts': return purchaseDrafts();
+case 'purchaseDraft': return purchaseDraft(args['id'] as int);
+case 'deletePurchaseDraft': await deletePurchaseDraft(args['id'] as int); return null;
+case 'completeMultiPurchase': return completeMultiPurchase(items: (args['items'] as List).map((v)=>_decodePurchaseLineDraft(Map<String,Object?>.from(v as Map))).toList(), supplier: (args['supplier'] as String), paid: (args['paid'] as int), paymentMethod: (args['paymentMethod'] as String), draftId:args['draftId'] as int?, completionKey:args['completionKey'] as String?);
 case 'completeMultiSale': return completeMultiSale(invoiceCode: (args['invoiceCode'] as String), items: (args['items'] as List).map((v)=>_decodeSaleLineDraft(Map<String,Object?>.from(v as Map))).toList(), customer: (args['customer'] as String), phone: (args['phone'] as String), cash: (args['cash'] as int), transfer: (args['transfer'] as int), warrantyMonths: (args['warrantyMonths'] as int));
 case 'sales': return sales();
 case 'cancelSale': await cancelSale((args['saleId'] as int)); return null;
@@ -2835,6 +2885,13 @@ case 'updateRepairStatus': await updateRepairStatus((args['id'] as int), (args['
 case 'repair': return repair((args['id'] as int));
 case 'updateRepair': await updateRepair(id: (args['id'] as int), customer: (args['customer'] as String), phone: (args['phone'] as String), device: (args['device'] as String), imei: (args['imei'] as String), issue: (args['issue'] as String), amount: (args['amount'] as int), partsCost: (args['partsCost'] as int), paid: (args['paid'] as int), note: (args['note'] as String)); return null;
 case 'deleteRepair': await deleteRepair((args['id'] as int)); return null;
+case 'saveCashEntry': return saveCashEntry(id:args['id'] as int?,type:args['type'] as String,scope:args['scope'] as String,category:args['category'] as String,amount:args['amount'] as int,note:args['note'] as String,paymentMethod:args['paymentMethod'] as String,occurredAt:args['occurredAt'] as String);
+case 'financeLedger': return financeLedger(DateTime.parse(args['from'] as String),DateTime.parse(args['to'] as String));
+case 'financeSummary': return financeSummary(DateTime.parse(args['from'] as String),DateTime.parse(args['to'] as String));
+case 'saveRecurringExpense': return saveRecurringExpense(id:args['id'] as int?,payload:Map<String,Object?>.from(args['payload'] as Map));
+case 'recurringExpenses': return recurringExpenses(args['year'] as int,args['month'] as int);
+case 'payRecurringExpense': return payRecurringExpense(args['id'] as int,args['year'] as int,args['month'] as int,args['paymentMethod'] as String,args['occurredAt'] as String);
+case 'deleteRecurringExpense': await deleteRecurringExpense(args['id'] as int);return null;
 case 'cashEntries': return cashEntries();
 case 'addCashEntry': await addCashEntry(type: (args['type'] as String), category: (args['category'] as String), amount: (args['amount'] as int), note: (args['note'] as String)); return null;
 case 'deleteCashEntry': await deleteCashEntry((args['id'] as int)); return null;
