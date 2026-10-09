@@ -69,6 +69,10 @@ void main() {
     expect(summary['income'],1000);expect(summary['revenue'],0);expect(summary['business_profit'],0);
     expect((await store.customers()).singleWhere((r)=>r['customer']=='Debt buyer')['debt'],2000);
   });
+  test('missing LAN protocol cannot create a transaction',()async{
+    await expectLater(store.executeRemote({'operation':'addProductBrand','arguments':{'rawName':'Legacy bad'},'requestId':'legacy-write-0001','revision':0}),throwsStateError);
+    expect((await store.productBrands()).where((r)=>r['name']=='Legacy bad'),isEmpty);
+  });
   test('LAN protocol mismatch rejects before mutation',() async {
     await expectLater(store.executeRemote({'operation':'dashboard','protocol':1}),throwsStateError);
   });
