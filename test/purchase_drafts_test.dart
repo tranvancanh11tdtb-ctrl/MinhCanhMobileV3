@@ -60,4 +60,14 @@ void main() {
     expect((await store.purchaseDrafts()).any((r)=>r['id']==draftId),false);
     line.dispose();
   });
+  test('invalid second purchase line rolls back draft and first line',()async{
+    final good=PurchaseLineDraft(product:product);good.cost.text='1000';good.serials.single.imei='490154203237550';
+    final bad=PurchaseLineDraft(product:product);bad.cost.text='1000';bad.serials.single.imei='490154203237550';
+    final draftId=await store.savePurchaseDraft(payload:{'items':[]});
+    final before=await store.serials(product['id'] as int);
+    await expectLater(store.completeMultiPurchase(items:[good,bad],supplier:'NCC',paid:0,paymentMethod:'cash',draftId:draftId,completionKey:'rollback-review-001'),throwsException);
+    expect(await store.serials(product['id'] as int),before);expect((await store.purchaseDraft(draftId))['id'],draftId);
+    good.dispose();bad.dispose();
+  });
+
 }

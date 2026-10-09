@@ -128,4 +128,13 @@ void main() {
       expect(row['closing_stock'], 1);
     },
   );
+  test('format 7 preserves draft and recurring payment identity',()async{
+    final id=await store.savePurchaseDraft(payload:{'supplier':'Roundtrip','items':[]});
+    final template=await store.saveRecurringExpense(payload:{'title':'Rent backup','amount':1000,'scope':'business','day':31,'start_month':'2026-10','active':true});
+    final cash=await store.payRecurringExpense(template,2026,10);
+    final source=await store.exportBackup();await store.deletePurchaseDraft(id);await store.restoreBackup(source);
+    expect(((await store.purchaseDraft(id))['payload'] as Map)['supplier'],'Roundtrip');
+    expect(await store.payRecurringExpense(template,2026,10),cash);
+  });
+
 }
