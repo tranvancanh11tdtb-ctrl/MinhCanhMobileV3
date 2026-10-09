@@ -24,8 +24,8 @@ void main() {
   });
   test('restore invalidates success receipts for writes removed by restore', () async {
     final backup=await store.exportBackup();
-    final revision=(await store.executeRemote({'operation':'dashboard'}))['revision'];
-    final request=<String,Object?>{'operation':'addProductBrand','arguments':{'rawName':'Removed by restore'},'requestId':'restore-stale-replay-001','revision':revision};
+    final revision=(await store.executeRemote({'protocol':2,'operation':'dashboard'}))['revision'];
+    final request=<String,Object?>{'protocol':2,'operation':'addProductBrand','arguments':{'rawName':'Removed by restore'},'requestId':'restore-stale-replay-001','revision':revision};
     await store.executeRemote(request);
     store.acknowledgeRemoteChanges();
     await store.restoreBackup(backup);

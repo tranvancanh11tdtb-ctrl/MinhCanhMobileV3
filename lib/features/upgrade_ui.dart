@@ -619,7 +619,7 @@ class DashboardDetailPage extends StatelessWidget {
     appBar: AppBar(
       title: Text(
         metric == 'fund'
-            ? 'Chi tiết số dư đã thu'
+            ? 'Chi tiết dòng tiền ròng'
             : metric == 'profit'
             ? 'Chi tiết lợi nhuận'
             : 'Chi tiết doanh thu',
@@ -629,7 +629,7 @@ class DashboardDetailPage extends StatelessWidget {
       future: Future.wait<Object>([
         StoreDb.instance.sales(),
         StoreDb.instance.repairs(),
-        StoreDb.instance.cashEntries(),
+        StoreDb.instance.financeLedger(DateTime(2000), DateTime(2100)),
         StoreDb.instance.dashboard(),
       ]),
       builder: (context, snap) {
@@ -663,59 +663,68 @@ class DashboardDetailPage extends StatelessWidget {
               'Hóa đơn bán hàng',
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
             ),
-            for (final s in sales.where((s) => s['status'] == 'completed'))
-              ListTile(
-                title: Text('${s['code']} • ${s['customer']}'),
-                subtitle: Text(formatDateTime(s['created_at'])),
-                trailing: Text(
-                  vnd(
-                    metric == 'fund'
-                        ? n(s, 'paid_cash') + n(s, 'paid_transfer')
-                        : metric == 'profit'
-                        ? n(s, 'total') - n(s, 'cost_total')
-                        : n(s, 'total'),
+            if (metric != 'fund')
+              for (final s in sales.where((s) => s['status'] == 'completed'))
+                ListTile(
+                  title: Text('${s['code']} • ${s['customer']}'),
+                  subtitle: Text(formatDateTime(s['created_at'])),
+                  trailing: Text(
+                    vnd(
+                      metric == 'fund'
+                          ? n(s, 'paid_cash') + n(s, 'paid_transfer')
+                          : metric == 'profit'
+                          ? n(s, 'total') - n(s, 'cost_total')
+                          : n(s, 'total'),
+                    ),
+                  ),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => InvoiceDetailPage(saleId: s['id'] as int),
+                    ),
                   ),
                 ),
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => InvoiceDetailPage(saleId: s['id'] as int),
-                  ),
-                ),
-              ),
             const Divider(),
             const Text(
               'Sửa chữa',
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
             ),
-            for (final r in repairs.where(
-              (r) => metric == 'fund'
-                  ? r['status'] != 'cancelled'
-                  : ['completed', 'returned'].contains(r['status']),
-            ))
-              ListTile(
-                title: Text('${r['code']} • ${r['customer']}'),
-                subtitle: Text('${r['device']}'),
-                trailing: Text(
-                  vnd(
-                    metric == 'fund'
-                        ? n(r, 'paid')
-                        : metric == 'profit'
-                        ? n(r, 'amount') - n(r, 'parts_cost')
-                        : n(r, 'amount'),
+            if (metric != 'fund')
+              for (final r in repairs.where(
+                (r) => metric == 'fund'
+                    ? r['status'] != 'cancelled'
+                    : ['completed', 'returned'].contains(r['status']),
+              ))
+                ListTile(
+                  title: Text('${r['code']} • ${r['customer']}'),
+                  subtitle: Text('${r['device']}'),
+                  trailing: Text(
+                    vnd(
+                      metric == 'fund'
+                          ? n(r, 'paid')
+                          : metric == 'profit'
+                          ? n(r, 'amount') - n(r, 'parts_cost')
+                          : n(r, 'amount'),
+                    ),
                   ),
                 ),
-              ),
-            if (metric == 'fund') ...[
+            if (metric == 'fund' || metric == 'profit') ...[
               const Divider(),
               const Text(
                 'Thu / chi khác',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
               ),
-              for (final r in cash)
+              for (final r in cash.where(
+                (r) =>
+                    metric == 'fund' ||
+                    (r['source_type'] == 'manual' &&
+                        ['business', 'business_interest'].contains(r['scope'])),
+              ))
                 ListTile(
                   title: Text('${r['note'] ?? r['category'] ?? ''}'),
-                  subtitle: Text(formatDateTime(r['created_at'])),
+                  subtitle: Text(
+                    formatDateTime(r['occurred_at'] ?? r['created_at']),
+                  ),
                   trailing: Text(
                     vnd(
                       n(r, 'amount') * (r['entry_type'] == 'expense' ? -1 : 1),

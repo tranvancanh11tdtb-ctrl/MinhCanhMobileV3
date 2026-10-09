@@ -32,6 +32,23 @@ String financeNow() => DateTime.now()
     .toIso8601String()
     .replaceAll('Z', '');
 
+bool financePeriodIncludes(String source, DateTime from, DateTime to) {
+  final date = vietnamWallDate(source);
+  return !date.isBefore(
+        DateTime.utc(
+          from.year,
+          from.month,
+          from.day,
+          from.hour,
+          from.minute,
+          from.second,
+        ),
+      ) &&
+      date.isBefore(
+        DateTime.utc(to.year, to.month, to.day, to.hour, to.minute, to.second),
+      );
+}
+
 extension FinanceStore on StoreDb {
   Future<void> _createFinanceTables(DatabaseExecutor db) async {
     final columns = (await db.rawQuery('PRAGMA table_info(cash_entries)'))
@@ -62,11 +79,51 @@ extension FinanceStore on StoreDb {
     final repairColumns = (await db.rawQuery('PRAGMA table_info(repairs)'))
         .map((r) => r['name'])
         .toSet();
+    if (!repairColumns.contains('initial_payment_known')) {
+      await db.execute(
+        'ALTER TABLE repairs ADD COLUMN initial_payment_known INTEGER NOT NULL DEFAULT 0',
+      );
+    }
     if (!repairColumns.contains('initial_paid')) {
       await db.execute(
         'ALTER TABLE repairs ADD COLUMN initial_paid INTEGER NOT NULL DEFAULT 0',
       );
       await db.execute('UPDATE repairs SET initial_paid=paid');
+    }
+  }
+
+  Future<void> _snapshotSaleRefund(
+    DatabaseExecutor db,
+    Map<String, Object?> sale,
+  ) async {
+    final id = sale['id'] as int;
+    if ((await db.query(
+      'payment_events',
+      where: "source_type='sale_refund' AND source_id=?",
+      whereArgs: [id],
+    )).isNotEmpty)
+      return;
+    for (final method in ['cash', 'transfer']) {
+      final amount = sale['paid_$method'] as int;
+      if (amount <= 0) continue;
+      await db.insert('payment_events', {
+        'source_type': 'sale_receipt',
+        'source_id': id,
+        'entry_type': 'income',
+        'amount': amount,
+        'payment_method': method,
+        'occurred_at': sale['created_at'],
+        'note': 'Thu bán hàng ${sale['code']}',
+      });
+      await db.insert('payment_events', {
+        'source_type': 'sale_refund',
+        'source_id': id,
+        'entry_type': 'expense',
+        'amount': amount,
+        'payment_method': method,
+        'occurred_at': financeNow(),
+        'note': 'Hoàn tiền hóa đơn ${sale['code']}',
+      });
     }
   }
 
@@ -238,7 +295,10 @@ extension FinanceStore on StoreDb {
           scope: 'inventory',
         );
       }
-      for (final r in await db.query('repairs', where: "status!='cancelled'")) {
+      for (final r in await db.query(
+        'repairs',
+        where: 'initial_payment_known=1',
+      )) {
         add(
           'repair',
           r['id'] as int,
@@ -250,15 +310,6 @@ extension FinanceStore on StoreDb {
         );
       }
       for (final r in await db.query('payment_events')) {
-        if (r['source_type'] == 'repair') {
-          final repairs = await db.query(
-            'repairs',
-            where: 'id=?',
-            whereArgs: [r['source_id']],
-          );
-          if (repairs.isEmpty || repairs.single['status'] == 'cancelled')
-            continue;
-        }
         add(
           '${r['source_type']}_payment',
           r['id'] as int,
@@ -306,6 +357,11 @@ extension FinanceStore on StoreDb {
         'cash_flow': 0,
         'business_profit': 0,
         'remaining_profit': 0,
+        'unknown_repair_payments':
+            (await db.rawQuery(
+                  'SELECT COALESCE(SUM(initial_paid),0) amount FROM repairs WHERE initial_payment_known=0',
+                )).single['amount']
+                as int,
       };
       for (final row in ledger) {
         final amount = row['amount'] as int;

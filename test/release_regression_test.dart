@@ -27,7 +27,7 @@ void main() {
   test('authoritative rejection releases an uncertain write', () async {
     await http.runWithClient(() async {
       final bridge=RemoteBridge();
-      bridge.pending={'operation':'addProductBrand','arguments':{'rawName':'A'},'requestId':'uncertain-request-001','revision':0};
+      bridge.pending={'protocol':2,'operation':'addProductBrand','arguments':{'rawName':'A'},'requestId':'uncertain-request-001','revision':0};
       await bridge.resolvePending();
       expect(bridge.pending,isNull);
       bridge.disconnect();
@@ -36,7 +36,7 @@ void main() {
   test('expired authentication does not discard uncertain write', () async {
     await http.runWithClient(() async {
       final bridge=RemoteBridge();
-      bridge.pending={'operation':'addProductBrand','arguments':{},'requestId':'uncertain-request-002','revision':0};
+      bridge.pending={'protocol':2,'operation':'addProductBrand','arguments':{},'requestId':'uncertain-request-002','revision':0};
       await bridge.resolvePending();
       expect(bridge.pending,isNotNull);
       expect(bridge.connected,isFalse);
@@ -61,8 +61,8 @@ void main() {
     expect(safety,expected);
   });
   test('remote change rejects stale native edits until acknowledged',() async {
-    final revision=(await store.executeRemote({'operation':'dashboard'}))['revision'];
-    await store.executeRemote({'operation':'addProductBrand','arguments':{'rawName':'Máy tính'},'requestId':'revision-guard-0001','revision':revision});
+    final revision=(await store.executeRemote({'protocol':2,'operation':'dashboard'}))['revision'];
+    await store.executeRemote({'protocol':2,'operation':'addProductBrand','arguments':{'rawName':'Máy tính'},'requestId':'revision-guard-0001','revision':revision});
     await expectLater(store.addProductBrand('Điện thoại cũ'),throwsStateError);
     expect((await store.productBrands()).any((r)=>r['name']=='Điện thoại cũ'),false);
     store.acknowledgeRemoteChanges();

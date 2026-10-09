@@ -81,8 +81,11 @@ class _PurchaseFormState extends State<PurchaseForm> {
     }
   }
 
-  Future<void> resize(PurchaseLineDraft line, int count) async {
-    if (count < 1) return;
+  Future<bool> resize(PurchaseLineDraft line, int count) async {
+    if (count < 1) {
+      line.quantityText.text = '${line.lineQuantity}';
+      return false;
+    }
     if (line.tracksImei &&
         count < line.serials.length &&
         line.serials
@@ -94,14 +97,31 @@ class _PurchaseFormState extends State<PurchaseForm> {
         context,
         'Giảm số máy',
         'Các IMEI cuối dòng sẽ bị bỏ khỏi phiếu. Tiếp tục?',
-      ))
-        return;
+      )) {
+        line.quantityText.text = '${line.lineQuantity}';
+        return false;
+      }
     }
     if (mounted)
       setState(() {
         line.quantity = count;
         line.syncSerials();
+        line.quantityText.text = '${line.lineQuantity}';
       });
+    return mounted;
+  }
+
+  Future<bool> flushQuantities() async {
+    for (final line in lines) {
+      final count = int.tryParse(line.quantityText.text);
+      if (count == null || count < 1) {
+        showError(context, 'Số lượng phải lớn hơn 0');
+        return false;
+      }
+      if (count != line.lineQuantity && !await resize(line, count))
+        return false;
+    }
+    return true;
   }
 
   Future<void> scan(PurchaseLineDraft line) async {
@@ -131,6 +151,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
     if (mounted)
       setState(() {
         line.quantity = line.serials.length;
+        line.quantityText.text = '${line.quantity}';
         expanded.add(line);
       });
   }
@@ -143,6 +164,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
   };
   Future<void> saveDraft() async {
     if (saving) return;
+    if (!await flushQuantities() || !mounted) return;
     setState(() => saving = true);
     try {
       final id = await StoreDb.instance.savePurchaseDraft(
@@ -253,6 +275,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
 
   Future<void> complete() async {
     if (saving) return;
+    if (!await flushQuantities() || !mounted) return;
     setState(() => saving = true);
     try {
       await StoreDb.instance.completeMultiPurchase(
@@ -293,8 +316,8 @@ class _PurchaseFormState extends State<PurchaseForm> {
       SizedBox(
         width: 44,
         child: TextFormField(
-          key: ValueKey('${identityHashCode(line)}-${line.lineQuantity}'),
-          initialValue: '${line.lineQuantity}',
+          key: ValueKey(line),
+          controller: line.quantityText,
           textAlign: TextAlign.center,
           keyboardType: TextInputType.number,
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
@@ -302,6 +325,10 @@ class _PurchaseFormState extends State<PurchaseForm> {
             isDense: true,
             contentPadding: EdgeInsets.all(6),
           ),
+          onChanged: (v) {
+            if (!line.tracksImei)
+              setState(() => line.quantity = int.tryParse(v) ?? 0);
+          },
           onFieldSubmitted: (v) => resize(line, int.tryParse(v) ?? 1),
         ),
       ),
@@ -496,6 +523,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
                   setState(() {
                     line.serials.remove(serial);
                     line.quantity = line.serials.length;
+                    line.quantityText.text = '${line.quantity}';
                   });
               }
             },

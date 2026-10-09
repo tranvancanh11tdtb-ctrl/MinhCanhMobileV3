@@ -139,6 +139,15 @@ class _CashBookPageState extends State<CashBookPage> {
                     ListView(
                       padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
                       children: [
+                        if ((totals['unknown_repair_payments'] ?? 0) > 0)
+                          Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Text(
+                                'Đã thu sửa chữa cũ: ${vnd(totals['unknown_repair_payments']!)} — không rõ ngày thu; chưa cộng vào thực thu theo kỳ.',
+                              ),
+                            ),
+                          ),
                         Wrap(
                           spacing: 4,
                           runSpacing: 4,
@@ -419,6 +428,7 @@ class _CashEntryFormState extends State<CashEntryForm> {
         ),
         const SizedBox(height: 14),
         DropdownButtonFormField<String>(
+          key:ValueKey(scope),
           initialValue: scope,
           decoration: const InputDecoration(labelText: 'Phân loại'),
           items: financeScopes.entries
@@ -528,6 +538,8 @@ class _CashEntryFormState extends State<CashEntryForm> {
   );
   Future<void> save() async {
     if (saving) return;
+    if(widget.entry!=null&&!await confirm(context,'Lưu thay đổi','Cập nhật khoản thu/chi này?'))return;
+    if(!mounted)return;
     setState(() => saving = true);
     try {
       await StoreDb.instance.saveCashEntry(
@@ -612,6 +624,7 @@ class _RecurringExpenseFormState extends State<RecurringExpenseForm> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
+          key:ValueKey(scope),
           initialValue: scope,
           decoration: const InputDecoration(labelText: 'Phân loại'),
           items: financeScopes.entries

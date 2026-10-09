@@ -50,8 +50,8 @@ extension InventoryPeriodReport on StoreDb {
       for (final sale in soldByProduct[row['id']] ?? <Map<String, Object?>>[]) {
         final date = vietnamWallDate('${sale['created_at']}');
         if (date.isBefore(start) || !date.isBefore(end)) continue;
-        revenue += sale['line_total'] as int;
-        cost += sale['line_cost'] as int;
+        revenue += (sale['quantity'] as int) * (sale['unit_price'] as int);
+        cost += (sale['quantity'] as int) * (sale['unit_cost'] as int);
         sold += sale['quantity'] as int;
       }
       final closing = (row['stock'] as num).toInt() - after;

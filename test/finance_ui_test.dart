@@ -8,7 +8,7 @@ void main(){
   setUpAll(()async{sqfliteFfiInit();databaseFactory=databaseFactoryFfi;dir=await Directory.systemTemp.createTemp('mcm-fin-ui-');await databaseFactory.setDatabasesPath(dir.path);});
   tearDownAll(()async{await(await store.database).close();await dir.delete(recursive:true);});
   testWidgets('finance book separates overview history and fixed costs',(tester)async{
-    await tester.runAsync(()async{await tester.pumpWidget(const MaterialApp(home:CashBookPage()));await store.cashEntries();});
+    await tester.runAsync(()async{await tester.pumpWidget(const MaterialApp(home:CashBookPage()));await store.financeSummary(DateTime(2000),DateTime(2100));await store.financeLedger(DateTime(2000),DateTime(2100));await store.recurringExpenses(DateTime.now().year,DateTime.now().month);await Future<void>.delayed(const Duration(milliseconds:100));});
     await tester.pumpAndSettle();
     expect(find.text('Tổng quan'),findsOneWidget);
     expect(find.text('Lịch sử'),findsOneWidget);

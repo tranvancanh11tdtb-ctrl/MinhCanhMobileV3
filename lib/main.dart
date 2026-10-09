@@ -1,11 +1,16 @@
 import 'dart:convert';
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:crypto/crypto.dart';
+
 import 'lan/remote_bridge.dart';
 import 'lan/lan_host_stub.dart' if (dart.library.io) 'lan/lan_host.dart';
-import 'platform/browser_print_stub.dart' if (dart.library.html) 'platform/browser_print.dart';
-import 'platform/socket_stub.dart' if (dart.library.io) 'platform/socket_native.dart';
+import 'platform/browser_print_stub.dart'
+    if (dart.library.html) 'platform/browser_print.dart';
+import 'platform/socket_stub.dart'
+    if (dart.library.io) 'platform/socket_native.dart';
+
 import 'dart:typed_data';
 
 import 'package:cross_file/cross_file.dart';
@@ -40,7 +45,7 @@ part 'features/connection_ui.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  if(!kIsWeb) await StoreDb.instance.database;
+  if (!kIsWeb) await StoreDb.instance.database;
   runApp(const MinhCanhApp());
 }
 
@@ -89,11 +94,13 @@ class SerialDraft {
 class PurchaseLineDraft {
   PurchaseLineDraft({required this.product, int initialQuantity = 1})
     : quantity = initialQuantity {
+    quantityText.text = '$initialQuantity';
     syncSerials();
   }
 
   final Map<String, Object?> product;
   int quantity;
+  final quantityText = TextEditingController();
   final cost = TextEditingController();
   final discount = TextEditingController(text: '0');
   final serials = <SerialDraft>[];
@@ -105,7 +112,10 @@ class PurchaseLineDraft {
       unitPrice >= discountPerItem ? unitPrice - discountPerItem : 0;
   int get lineQuantity => tracksImei ? serials.length : quantity;
   int get total => tracksImei
-      ? serials.fold<int>(0, (sum, serial) => sum + (serial.cost > 0 ? serial.cost : netUnitCost))
+      ? serials.fold<int>(
+          0,
+          (sum, serial) => sum + (serial.cost > 0 ? serial.cost : netUnitCost),
+        )
       : lineQuantity * netUnitCost;
 
   void syncSerials() {
@@ -123,6 +133,7 @@ class PurchaseLineDraft {
   }
 
   void dispose() {
+    quantityText.dispose();
     cost.dispose();
     discount.dispose();
   }
@@ -161,26 +172,57 @@ class PinGate extends StatefulWidget {
 }
 
 class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
-  late final deviceUnlock = DeviceUnlock(read:StoreDb.instance.getSetting,write:StoreDb.instance.setSetting);
-  bool biometrics=false, authenticating=false;
+  late final deviceUnlock = DeviceUnlock(
+    read: StoreDb.instance.getSetting,
+    write: StoreDb.instance.setSetting,
+  );
+  bool biometrics = false, authenticating = false;
 
-  @override void dispose(){WidgetsBinding.instance.removeObserver(this);pin.dispose();confirmPin.dispose();super.dispose();}
-  @override void didChangeAppLifecycleState(AppLifecycleState state){
-    if(state==AppLifecycleState.paused || state==AppLifecycleState.hidden){deviceUnlock.background(DateTime.now());}
-    if(state==AppLifecycleState.resumed && deviceUnlock.resume(DateTime.now()) && unlocked){
-      Navigator.of(context).popUntil((route)=>route.isFirst);
-      setState((){unlocked=false;pin.clear();});
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    pin.dispose();
+    confirmPin.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      deviceUnlock.background(DateTime.now());
+    }
+    if (state == AppLifecycleState.resumed &&
+        deviceUnlock.resume(DateTime.now()) &&
+        unlocked) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      setState(() {
+        unlocked = false;
+        pin.clear();
+      });
       _load();
     }
   }
+
   Future<void> biometricUnlock() async {
-    if(authenticating)return;
-    setState(()=>authenticating=true);
-    final ok=await deviceUnlock.biometricUnlock();
-    if(!mounted)return;
-    setState((){authenticating=false;if(ok){unlocked=true;pin.clear();}});
-    if(!ok)showError(context,'Chưa xác thực được. Anh có thể thử lại hoặc nhập mã PIN.');
+    if (authenticating) return;
+    setState(() => authenticating = true);
+    final ok = await deviceUnlock.biometricUnlock();
+    if (!mounted) return;
+    setState(() {
+      authenticating = false;
+      if (ok) {
+        unlocked = true;
+        pin.clear();
+      }
+    });
+    if (!ok)
+      showError(
+        context,
+        'Chưa xác thực được. Anh có thể thử lại hoặc nhập mã PIN.',
+      );
   }
+
   final pin = TextEditingController();
   final confirmPin = TextEditingController();
   String? savedPin;
@@ -196,7 +238,7 @@ class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
   }
 
   Future<void> _load() async {
-    biometrics=await StoreDb.instance.getSetting('biometric_enabled')=='1';
+    biometrics = await StoreDb.instance.getSetting('biometric_enabled') == '1';
     savedPin = await StoreDb.instance.getSetting('pin');
     if (mounted) setState(() => loading = false);
   }
@@ -290,11 +332,18 @@ class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
                     ),
                   ],
                   const SizedBox(height: 16),
-                  if(!creating && biometrics) OutlinedButton.icon(
-                    onPressed:authenticating?null:biometricUnlock,
-                    icon:const Icon(Icons.fingerprint),label:const Text('Mở khóa bằng sinh trắc học')),
+                  if (!creating && biometrics)
+                    OutlinedButton.icon(
+                      onPressed: authenticating ? null : biometricUnlock,
+                      icon: const Icon(Icons.fingerprint),
+                      label: const Text('Mở khóa bằng sinh trắc học'),
+                    ),
                   FilledButton.icon(
-                    onPressed: authenticating ? null : creating ? _createPin : _unlock,
+                    onPressed: authenticating
+                        ? null
+                        : creating
+                        ? _createPin
+                        : _unlock,
                     icon: Icon(
                       creating ? Icons.check_circle_outline : Icons.login,
                     ),
@@ -325,10 +374,13 @@ class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
   }
 
   Future<void> _unlock() async {
-    final valid=await deviceUnlock.checkPin(pin.text);
-    if(!mounted)return;
-    if(!valid)return showError(context,'Mã PIN không đúng');
-    setState((){unlocked=true;pin.clear();});
+    final valid = await deviceUnlock.checkPin(pin.text);
+    if (!mounted) return;
+    if (!valid) return showError(context, 'Mã PIN không đúng');
+    setState(() {
+      unlocked = true;
+      pin.clear();
+    });
   }
 }
 
@@ -399,35 +451,192 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  int index=0, refreshKey=0;
-  void refresh(){if(kIsWeb)remoteBridge.acceptLatest();setState(()=>refreshKey++);}
-  @override Widget build(BuildContext context){
-    final wide=MediaQuery.sizeOf(context).width>=840;
-    final pages=[DashboardPage(key:ValueKey('d$refreshKey')),ProductsPage(key:ValueKey('p$refreshKey'),onChanged:refresh),SalePage(key:ValueKey('s$refreshKey'),onChanged:refresh),InvoicesPage(key:ValueKey('i$refreshKey'),onChanged:refresh),MorePage(onChanged:refresh,onSelectTab:(v)=>setState(()=>index=v))];
-    const labels=['Tổng quan','Hàng hóa','Bán hàng','Hóa đơn','Nhiều hơn'];
-    const icons=[Icons.insights_outlined,Icons.inventory_2_outlined,Icons.shopping_bag_outlined,Icons.receipt_long_outlined,Icons.menu];
-    return Scaffold(body:SafeArea(child:Column(children:[
-      if(!kIsWeb) ValueListenableBuilder<int>(valueListenable:StoreDb.instance.remoteChanges,builder:(context,_,child)=>StoreDb.instance._nativeStale?Material(color:const Color(0xffffefce),child:Padding(padding:const EdgeInsets.all(12),child:Wrap(crossAxisAlignment:WrapCrossAlignment.center,children:[
-        const Text('Dữ liệu đã thay đổi trên máy tính.'),
-        TextButton(onPressed:()async {
-          if(!await confirm(context,'Tải lại dữ liệu','Dữ liệu mới sẽ được tải từ kho. Nội dung đang nhập chưa lưu sẽ được bỏ. Tiếp tục?'))return;
-          if(!mounted)return;
-          StoreDb.instance.acknowledgeRemoteChanges();refresh();
-        },child:const Text('Tải lại dữ liệu')),
-      ]))):const SizedBox.shrink()),
-      if(kIsWeb) AnimatedBuilder(animation:remoteBridge,builder:(context,_)=>Material(color:remoteBridge.connected?const Color(0xffe8f3fc):const Color(0xffffe4e4),child:Padding(padding:const EdgeInsets.symmetric(horizontal:16,vertical:8),child:Wrap(crossAxisAlignment:WrapCrossAlignment.center,spacing:12,children:[
-        Icon(remoteBridge.connected?Icons.wifi:Icons.wifi_off,size:18),
-        Text(remoteBridge.message??(remoteBridge.connected?'Đang dùng dữ liệu trên điện thoại':'Mất kết nối điện thoại')),
-        if(!remoteBridge.connected) TextButton(onPressed:(){remoteBridge.disconnect();Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder:(_)=>const PairGate()),(_)=>false);},child:const Text('Ghép nối lại')),
-        if(remoteBridge.pending!=null) TextButton(onPressed:remoteBridge.busy?null:()async{try{await remoteBridge.resolvePending();}catch(e){if(context.mounted)showError(context,e.toString());}},child:const Text('Kiểm tra giao dịch')),
-        TextButton.icon(onPressed:remoteBridge.pending!=null?null:()async{await remoteBridge.poll();if(remoteBridge.connected)refresh();},icon:const Icon(Icons.refresh),label:const Text('Tải lại dữ liệu')),
-      ])))),
-      Expanded(child:Row(children:[
-        if(wide) NavigationRail(extended:true,minExtendedWidth:190,leading:const Padding(padding:EdgeInsets.all(16),child:Text('MINH CẢNH\nMOBILE',style:TextStyle(fontSize:20,fontWeight:FontWeight.w900,color:Color(0xff0877d1)))),selectedIndex:index,onDestinationSelected:(v)=>setState(()=>index=v),destinations:[for(var i=0;i<labels.length;i++)NavigationRailDestination(icon:Icon(icons[i]),label:Text(labels[i]))]),
-        if(wide)const VerticalDivider(width:1),
-        Expanded(child:IndexedStack(index:index,children:pages)),
-      ])),
-    ])),bottomNavigationBar:wide?null:NavigationBar(selectedIndex:index,onDestinationSelected:(v)=>setState(()=>index=v),destinations:[for(var i=0;i<labels.length;i++)NavigationDestination(icon:Icon(icons[i]),label:labels[i])]));
+  int index = 0, refreshKey = 0;
+  void refresh() {
+    if (kIsWeb) remoteBridge.acceptLatest();
+    setState(() => refreshKey++);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 840;
+    final pages = [
+      DashboardPage(key: ValueKey('d$refreshKey')),
+      ProductsPage(key: ValueKey('p$refreshKey'), onChanged: refresh),
+      SalePage(key: ValueKey('s$refreshKey'), onChanged: refresh),
+      InvoicesPage(key: ValueKey('i$refreshKey'), onChanged: refresh),
+      MorePage(
+        onChanged: refresh,
+        onSelectTab: (v) => setState(() => index = v),
+      ),
+    ];
+    const labels = [
+      'Tổng quan',
+      'Hàng hóa',
+      'Bán hàng',
+      'Hóa đơn',
+      'Nhiều hơn',
+    ];
+    const icons = [
+      Icons.insights_outlined,
+      Icons.inventory_2_outlined,
+      Icons.shopping_bag_outlined,
+      Icons.receipt_long_outlined,
+      Icons.menu,
+    ];
+    return Scaffold(
+      body: SafeArea(
+        child: Column(
+          children: [
+            if (!kIsWeb)
+              ValueListenableBuilder<int>(
+                valueListenable: StoreDb.instance.remoteChanges,
+                builder: (context, _, child) => StoreDb.instance._nativeStale
+                    ? Material(
+                        color: const Color(0xffffefce),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              const Text('Dữ liệu đã thay đổi trên máy tính.'),
+                              TextButton(
+                                onPressed: () async {
+                                  if (!await confirm(
+                                    context,
+                                    'Tải lại dữ liệu',
+                                    'Dữ liệu mới sẽ được tải từ kho. Nội dung đang nhập chưa lưu sẽ được bỏ. Tiếp tục?',
+                                  ))
+                                    return;
+                                  if (!mounted) return;
+                                  StoreDb.instance.acknowledgeRemoteChanges();
+                                  refresh();
+                                },
+                                child: const Text('Tải lại dữ liệu'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            if (kIsWeb)
+              AnimatedBuilder(
+                animation: remoteBridge,
+                builder: (context, _) => Material(
+                  color: remoteBridge.connected
+                      ? const Color(0xffe8f3fc)
+                      : const Color(0xffffe4e4),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    child: Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 12,
+                      children: [
+                        Icon(
+                          remoteBridge.connected ? Icons.wifi : Icons.wifi_off,
+                          size: 18,
+                        ),
+                        Text(
+                          remoteBridge.message ??
+                              (remoteBridge.connected
+                                  ? 'Đang dùng dữ liệu trên điện thoại'
+                                  : 'Mất kết nối điện thoại'),
+                        ),
+                        if (!remoteBridge.connected)
+                          TextButton(
+                            onPressed: () {
+                              remoteBridge.disconnect();
+                              Navigator.of(context).pushAndRemoveUntil(
+                                MaterialPageRoute(
+                                  builder: (_) => const PairGate(),
+                                ),
+                                (_) => false,
+                              );
+                            },
+                            child: const Text('Ghép nối lại'),
+                          ),
+                        if (remoteBridge.pending != null)
+                          TextButton(
+                            onPressed: remoteBridge.busy
+                                ? null
+                                : () async {
+                                    try {
+                                      await remoteBridge.resolvePending();
+                                    } catch (e) {
+                                      if (context.mounted)
+                                        showError(context, e.toString());
+                                    }
+                                  },
+                            child: const Text('Kiểm tra giao dịch'),
+                          ),
+                        TextButton.icon(
+                          onPressed: remoteBridge.pending != null
+                              ? null
+                              : () async {
+                                  await remoteBridge.poll();
+                                  if (remoteBridge.connected) refresh();
+                                },
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Tải lại dữ liệu'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            Expanded(
+              child: Row(
+                children: [
+                  if (wide)
+                    NavigationRail(
+                      extended: true,
+                      minExtendedWidth: 190,
+                      leading: const Padding(
+                        padding: EdgeInsets.all(16),
+                        child: Text(
+                          'MINH CẢNH\nMOBILE',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xff0877d1),
+                          ),
+                        ),
+                      ),
+                      selectedIndex: index,
+                      onDestinationSelected: (v) => setState(() => index = v),
+                      destinations: [
+                        for (var i = 0; i < labels.length; i++)
+                          NavigationRailDestination(
+                            icon: Icon(icons[i]),
+                            label: Text(labels[i]),
+                          ),
+                      ],
+                    ),
+                  if (wide) const VerticalDivider(width: 1),
+                  Expanded(
+                    child: IndexedStack(index: index, children: pages),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      bottomNavigationBar: wide
+          ? null
+          : NavigationBar(
+              selectedIndex: index,
+              onDestinationSelected: (v) => setState(() => index = v),
+              destinations: [
+                for (var i = 0; i < labels.length; i++)
+                  NavigationDestination(icon: Icon(icons[i]), label: labels[i]),
+              ],
+            ),
+    );
   }
 }
 
@@ -2230,10 +2439,12 @@ class _SalePageState extends State<SalePage> {
 
   Future<void> _loadCustomers({int? selectId}) async {
     final raw = await StoreDb.instance.customers();
-    final rows=raw.map((r)=>{...r,'name':r['customer']??r['name']}).toList();
+    final rows = raw
+        .map((r) => {...r, 'name': r['customer'] ?? r['name']})
+        .toList();
     if (!mounted) return;
     setState(() {
-      customers=rows;
+      customers = rows;
       if (selectId != null) {
         selectedCustomerId = selectId;
         final selected = rows.where((row) => row['id'] == selectId);
@@ -2780,7 +2991,11 @@ class _SalePageState extends State<SalePage> {
                   ),
                 ),
                 const SizedBox(height: 14),
-                CustomerSearchPicker(rows:customers,selectedId:selectedCustomerId,onSelected:_pickCustomer),
+                CustomerSearchPicker(
+                  rows: customers,
+                  selectedId: selectedCustomerId,
+                  onSelected: _pickCustomer,
+                ),
                 if (selectedCustomerId > 0) ...[
                   const SizedBox(height: 8),
                   Text(
@@ -3112,7 +3327,7 @@ class _InvoicesPageState extends State<InvoicesPage> {
     final accepted = await confirm(
       context,
       'Hủy hóa đơn',
-      'Hủy hóa đơn sẽ hoàn lại tồn kho và loại số liệu khỏi doanh thu. '
+      'Hủy hóa đơn sẽ hoàn lại tồn kho, hoàn khoản tiền đã thu trên hóa đơn và loại số liệu khỏi doanh thu. '
           'Tiếp tục?',
     );
     if (!accepted) return;
@@ -3498,8 +3713,35 @@ class MorePage extends StatelessWidget {
       ]),
       const SizedBox(height: 12),
       MenuGroup('Dữ liệu', [
-        if(!kIsWeb) MenuAction(Icons.devices_rounded,'Kết nối máy tính',()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>const ConnectionPage()))),
-        if(kIsWeb) MenuAction(Icons.print_outlined,'In trên máy tính',()=>showDialog<void>(context:context,builder:(ctx)=>AlertDialog(title:const Text('In hóa đơn và tem'),content:const Text('Mở hóa đơn hoặc tem, chọn In hoặc Chia sẻ để tải PDF. Mở PDF và in bằng máy in đã cài trên máy tính; chọn đúng khổ giấy và tỷ lệ 100%.'),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Đã hiểu'))]))),
+        if (!kIsWeb)
+          MenuAction(
+            Icons.devices_rounded,
+            'Kết nối máy tính',
+            () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ConnectionPage()),
+            ),
+          ),
+        if (kIsWeb)
+          MenuAction(
+            Icons.print_outlined,
+            'In trên máy tính',
+            () => showDialog<void>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('In hóa đơn và tem'),
+                content: const Text(
+                  'Mở hóa đơn hoặc tem, chọn In hoặc Chia sẻ để tải PDF. Mở PDF và in bằng máy in đã cài trên máy tính; chọn đúng khổ giấy và tỷ lệ 100%.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Đã hiểu'),
+                  ),
+                ],
+              ),
+            ),
+          ),
         MenuAction(
           Icons.account_balance,
           'Tài khoản nhận chuyển khoản',
@@ -3508,22 +3750,26 @@ class MorePage extends StatelessWidget {
             MaterialPageRoute(builder: (_) => const PaymentSettingsPage()),
           ),
         ),
-        if(!kIsWeb) MenuAction(
-          Icons.label_outline,
-          'Cài đặt máy in tem 40×30',
-          () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const LabelPrinterSettingsPage()),
+        if (!kIsWeb)
+          MenuAction(
+            Icons.label_outline,
+            'Cài đặt máy in tem 40×30',
+            () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const LabelPrinterSettingsPage(),
+              ),
+            ),
           ),
-        ),
-        if(!kIsWeb) MenuAction(
-          Icons.print,
-          'Cài đặt máy in K80',
-          () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
+        if (!kIsWeb)
+          MenuAction(
+            Icons.print,
+            'Cài đặt máy in K80',
+            () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
+            ),
           ),
-        ),
         MenuAction(Icons.backup, 'Sao lưu & khôi phục', () async {
           await Navigator.push(
             context,
@@ -3531,15 +3777,24 @@ class MorePage extends StatelessWidget {
           );
           onChanged();
         }),
-        if(!kIsWeb) MenuAction(Icons.fingerprint,'Mở khóa sinh trắc học',()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>const BiometricSettingsPage()))),
-        if(!kIsWeb) MenuAction(
-          Icons.password,
-          'Đổi mã PIN',
-          () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const ChangePinPage()),
+        if (!kIsWeb)
+          MenuAction(
+            Icons.fingerprint,
+            'Mở khóa sinh trắc học',
+            () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const BiometricSettingsPage()),
+            ),
           ),
-        ),
+        if (!kIsWeb)
+          MenuAction(
+            Icons.password,
+            'Đổi mã PIN',
+            () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ChangePinPage()),
+            ),
+          ),
       ]),
     ],
   );
@@ -4431,7 +4686,7 @@ class _ReportsPageState extends State<ReportsPage> {
             padding: EdgeInsets.all(14),
             child: Text(
               'Lợi nhuận sau chi phí = lợi nhuận bán hàng và sửa chữa '
-              '+ thu khác − các khoản chi trong Sổ quỹ.',
+              '+ thu cửa hàng khác − chi cửa hàng và lãi vay. Chi cá nhân và trả gốc vay được theo dõi riêng.',
               style: TextStyle(color: Colors.black54),
             ),
           ),
@@ -5021,8 +5276,8 @@ class _DebtAdjustmentPageState extends State<DebtAdjustmentPage> {
   final amount = TextEditingController();
   final note = TextEditingController();
   bool increase = false;
-  bool isPayment=true;
-  String paymentMethod='cash';
+  bool isPayment = true;
+  String paymentMethod = 'cash';
   bool saving = false;
 
   int get amountValue => int.tryParse(amount.text) ?? 0;
@@ -5082,9 +5337,30 @@ class _DebtAdjustmentPageState extends State<DebtAdjustmentPage> {
             onSelectionChanged: (value) =>
                 setState(() => increase = value.first),
           ),
-          if(!increase)...[
-            SwitchListTile(title:const Text('Có thu / trả tiền thực tế'),subtitle:const Text('Tắt nếu chỉ điều chỉnh số nợ, không có tiền thu/chi'),value:isPayment,onChanged:(v)=>setState(()=>isPayment=v)),
-            if(isPayment)DropdownButtonFormField<String>(initialValue:paymentMethod,decoration:const InputDecoration(labelText:'Phương thức thanh toán'),items:const [DropdownMenuItem(value:'cash',child:Text('Tiền mặt')),DropdownMenuItem(value:'transfer',child:Text('Chuyển khoản'))],onChanged:(v)=>setState(()=>paymentMethod=v!)),
+          if (!increase) ...[
+            SwitchListTile(
+              title: const Text('Có thu / trả tiền thực tế'),
+              subtitle: const Text(
+                'Tắt nếu chỉ điều chỉnh số nợ, không có tiền thu/chi',
+              ),
+              value: isPayment,
+              onChanged: (v) => setState(() => isPayment = v),
+            ),
+            if (isPayment)
+              DropdownButtonFormField<String>(
+                initialValue: paymentMethod,
+                decoration: const InputDecoration(
+                  labelText: 'Phương thức thanh toán',
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'cash', child: Text('Tiền mặt')),
+                  DropdownMenuItem(
+                    value: 'transfer',
+                    child: Text('Chuyển khoản'),
+                  ),
+                ],
+                onChanged: (v) => setState(() => paymentMethod = v!),
+              ),
           ],
           const SizedBox(height: 16),
           TextField(
@@ -5133,7 +5409,8 @@ class _DebtAdjustmentPageState extends State<DebtAdjustmentPage> {
         increase: increase,
         currentDebt: widget.currentDebt,
         note: note.text,
-        isPayment:!increase&&isPayment, paymentMethod:paymentMethod,
+        isPayment: !increase && isPayment,
+        paymentMethod: paymentMethod,
       );
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
@@ -7405,13 +7682,17 @@ class _BackupPageState extends State<BackupPage> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  kIsWeb ? 'Tải bản sao lưu JSON về máy tính. Cất giữ tệp này để khôi phục kho, hóa đơn, công nợ và lịch sử khi cần.' : 'Ứng dụng sẽ sao chép toàn bộ kho, hóa đơn, bảo hành, sửa chữa và sổ quỹ vào bộ nhớ tạm. Hãy dán nội dung đó vào Ghi chú hoặc một tệp riêng để cất giữ.',
+                  kIsWeb
+                      ? 'Tải bản sao lưu JSON về máy tính. Cất giữ tệp này để khôi phục kho, hóa đơn, công nợ và lịch sử khi cần.'
+                      : 'Ứng dụng sẽ sao chép toàn bộ kho, hóa đơn, bảo hành, sửa chữa và sổ quỹ vào bộ nhớ tạm. Hãy dán nội dung đó vào Ghi chú hoặc một tệp riêng để cất giữ.',
                 ),
                 const SizedBox(height: 14),
                 FilledButton.icon(
                   onPressed: busy ? null : backup,
                   icon: const Icon(Icons.copy_all),
-                  label: const Text(kIsWeb ? 'Tải bản sao lưu' : 'Sao chép bản sao lưu'),
+                  label: const Text(
+                    kIsWeb ? 'Tải bản sao lưu' : 'Sao chép bản sao lưu',
+                  ),
                 ),
               ],
             ),
@@ -7459,10 +7740,29 @@ class _BackupPageState extends State<BackupPage> {
     setState(() => busy = true);
     try {
       final data = await StoreDb.instance.exportBackup();
-      if(kIsWeb) {
-        if(mounted) await showDialog<void>(context:context,builder:(ctx)=>AlertDialog(
-          title:const Text('Bản sao lưu đã sẵn sàng'),content:const Text('Bấm tải tệp JSON. Khi cần khôi phục, mở tệp và dán toàn bộ nội dung vào ô khôi phục.'),
-          actions:[FilledButton(onPressed:(){browserDownloadBackup(data,'MinhCanh-backup-${DateTime.now().millisecondsSinceEpoch}.json');Navigator.pop(ctx);},child:const Text('Tải tệp JSON'))]));
+      if (kIsWeb) {
+        if (mounted)
+          await showDialog<void>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Bản sao lưu đã sẵn sàng'),
+              content: const Text(
+                'Bấm tải tệp JSON. Khi cần khôi phục, mở tệp và dán toàn bộ nội dung vào ô khôi phục.',
+              ),
+              actions: [
+                FilledButton(
+                  onPressed: () {
+                    browserDownloadBackup(
+                      data,
+                      'MinhCanh-backup-${DateTime.now().millisecondsSinceEpoch}.json',
+                    );
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('Tải tệp JSON'),
+                ),
+              ],
+            ),
+          );
         return;
       }
       await Clipboard.setData(ClipboardData(text: data));
@@ -7485,7 +7785,9 @@ class _BackupPageState extends State<BackupPage> {
       }
     } catch (e) {
       if (mounted) showError(context, e);
-    } finally {if(mounted)setState(()=>busy=false);}
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
   }
 
   Future<void> restore() async {
@@ -7678,7 +7980,10 @@ class ProductLabelPrinter {
     List<ProductLabelData> labels,
     bool showPrice,
   ) async {
-    if(kIsWeb){await share(context,labels,showPrice);return;}
+    if (kIsWeb) {
+      await share(context, labels, showPrice);
+      return;
+    }
     final mac =
         await StoreDb.instance.getSetting('label_printer_bluetooth_mac') ?? '';
     if (mac.isEmpty) {
@@ -7721,7 +8026,10 @@ class ProductLabelPrinter {
       );
     }
     final bytes = await document.save();
-    if(kIsWeb){await offerBrowserPdf(context,bytes,'Tem_40x30_Minh_Canh_Mobile.pdf');return;}
+    if (kIsWeb) {
+      await offerBrowserPdf(context, bytes, 'Tem_40x30_Minh_Canh_Mobile.pdf');
+      return;
+    }
     await SharePlus.instance.share(
       ShareParams(
         files: [XFile.fromData(bytes, mimeType: 'application/pdf')],
@@ -8409,7 +8717,10 @@ class ReceiptPrinter {
     BuildContext context,
     ReceiptDocument receipt,
   ) async {
-    if(kIsWeb){await share(context,receipt);return;}
+    if (kIsWeb) {
+      await share(context, receipt);
+      return;
+    }
     final transport =
         await StoreDb.instance.getSetting('printer_transport') ?? 'lan';
     final savedCopies = int.tryParse(
@@ -8479,7 +8790,10 @@ class ReceiptPrinter {
       ),
     );
     final pdfBytes = await document.save();
-    if(kIsWeb){await offerBrowserPdf(context,pdfBytes,receipt.fileName);return;}
+    if (kIsWeb) {
+      await offerBrowserPdf(context, pdfBytes, receipt.fileName);
+      return;
+    }
     await SharePlus.instance.share(
       ShareParams(
         files: [XFile.fromData(pdfBytes, mimeType: 'application/pdf')],
