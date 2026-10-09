@@ -20,8 +20,8 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: dart tool/check_pairing.dart
-      - run: flutter analyze --no-fatal-infos
       - run: flutter test
+      - run: flutter analyze --no-fatal-infos
       - run: flutter create --platforms android,web --org vn.minhcanhmobile --project-name minh_canh_mobile_v3 .
       - run: flutter build web --release --no-web-resources-cdn
       - uses: actions/upload-artifact@v4
