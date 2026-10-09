@@ -162,6 +162,16 @@ class _CashBookPageState extends State<CashBookPage> {
                             ),
                             metric('Thực thu', totals['income']!),
                             metric('Thực chi', totals['expense']!),
+                            metric(
+                              'Chi bình quân / ngày trong kỳ',
+                              totals['expense']! ~/
+                                  ((period.end ?? DateTime(2100))
+                                      .difference(
+                                        period.start ?? DateTime(2000),
+                                      )
+                                      .inDays
+                                      .clamp(1, 40000)),
+                            ),
                             metric('Dòng tiền ròng', totals['cash_flow']!),
                             metric(
                               'Chi gia đình',
@@ -428,7 +438,7 @@ class _CashEntryFormState extends State<CashEntryForm> {
         ),
         const SizedBox(height: 14),
         DropdownButtonFormField<String>(
-          key:ValueKey(scope),
+          key: ValueKey(scope),
           initialValue: scope,
           decoration: const InputDecoration(labelText: 'Phân loại'),
           items: financeScopes.entries
@@ -538,8 +548,10 @@ class _CashEntryFormState extends State<CashEntryForm> {
   );
   Future<void> save() async {
     if (saving) return;
-    if(widget.entry!=null&&!await confirm(context,'Lưu thay đổi','Cập nhật khoản thu/chi này?'))return;
-    if(!mounted)return;
+    if (widget.entry != null &&
+        !await confirm(context, 'Lưu thay đổi', 'Cập nhật khoản thu/chi này?'))
+      return;
+    if (!mounted) return;
     setState(() => saving = true);
     try {
       await StoreDb.instance.saveCashEntry(
@@ -624,7 +636,7 @@ class _RecurringExpenseFormState extends State<RecurringExpenseForm> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
-          key:ValueKey(scope),
+          key: ValueKey(scope),
           initialValue: scope,
           decoration: const InputDecoration(labelText: 'Phân loại'),
           items: financeScopes.entries

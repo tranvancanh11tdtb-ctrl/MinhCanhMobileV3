@@ -2382,7 +2382,6 @@ class StoreDb {
   }
 
   Future<List<Map<String, Object?>>> _localSalesTrend(String mode) async {
-    final db = await _executor;
     final now = vietnamWallDate(financeNow());
     late DateTime first;
     late int count;

@@ -2,6 +2,7 @@ name: V3.12 upgrade checks
 on:
   push:
     branches: [agent/v3-12-upgrade]
+    paths-ignore: ["docs/**", "README.md"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,6 +32,12 @@ jobs:
       - run: python3 tool/configure_android.py
       - run: flutter pub get
       - run: flutter build apk --release
+      - name: Verify APK signature and package
+        shell: bash
+        run: |
+          build_tools_path="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          "$build_tools_path/apksigner" verify --verbose --print-certs build/app/outputs/flutter-apk/app-release.apk
+          "$build_tools_path/aapt" dump badging build/app/outputs/flutter-apk/app-release.apk | head -n 1
       - uses: actions/upload-artifact@v4
         with:
           name: MinhCanhMobileV312-APK

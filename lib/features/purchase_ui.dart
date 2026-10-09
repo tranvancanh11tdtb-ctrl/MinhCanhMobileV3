@@ -420,20 +420,18 @@ class _PurchaseFormState extends State<PurchaseForm> {
                   Row(
                     children: [
                       Expanded(child: title),
+                      quantity(line),
                       buttons,
                     ],
                   ),
                   Row(
                     children: [
                       Expanded(child: number(line.cost, 'Đơn giá')),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 6),
                       Expanded(child: number(line.discount, 'CK / đơn vị')),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      quantity(line),
-                      Expanded(
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: 85,
                         child: Text(
                           vnd(line.total),
                           textAlign: TextAlign.right,

@@ -86,7 +86,9 @@ void main() {
         draftId = await store.savePurchaseDraft(
           payload: {'supplier': 'Twenty $width', 'items': items},
         );
-        await tester.pumpWidget(MaterialApp(home: PurchaseForm(key:UniqueKey())));
+        await tester.pumpWidget(
+          MaterialApp(home: PurchaseForm(key: UniqueKey())),
+        );
         await store.products();
         await store.supplierDirectory();
       });
@@ -97,11 +99,22 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 100));
       });
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Phiếu $draftId • Twenty $width'));
+      await tester.runAsync(() async {
+        await tester.tap(find.text('Phiếu $draftId • Twenty $width'));
+        await Future<void>.delayed(Duration.zero);
+      });
       await tester.pumpAndSettle();
       expect(find.text('Lưu tạm').hitTestable(), findsOneWidget);
       expect(find.text('Hoàn thành').hitTestable(), findsOneWidget);
-      expect(find.text('Line 0'),findsOneWidget,reason:find.byType(Text).evaluate().map((e)=>(e.widget as Text).data).join(' | '));
+      expect(
+        find.text('Line 0'),
+        findsOneWidget,
+        reason: find
+            .byType(Text)
+            .evaluate()
+            .map((e) => (e.widget as Text).data)
+            .join(' | '),
+      );
       if (width < 500) {
         final firstCard = find
             .ancestor(of: find.text('Line 0'), matching: find.byType(Card))
@@ -137,7 +150,9 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       await tester.runAsync(() async {
-        await tester.pumpWidget(MaterialApp(home: PurchaseForm(key:UniqueKey())));
+        await tester.pumpWidget(
+          MaterialApp(home: PurchaseForm(key: UniqueKey())),
+        );
         await store.products();
         await store.supplierDirectory();
       });
