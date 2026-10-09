@@ -1,12 +1,12 @@
-name: V3.11 upgrade checks
+name: V3.12 upgrade checks
 on:
   push:
-    branches: [agent/v3-11-wifi-dashboard]
+    branches: [agent/v3-12-upgrade]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: v311-${{ github.ref }}
+  group: v312-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   check:
@@ -26,12 +26,12 @@ jobs:
       - run: flutter build web --release --no-web-resources-cdn
       - uses: actions/upload-artifact@v4
         with:
-          name: MinhCanhMobileV311-Web
+          name: MinhCanhMobileV312-Web
           path: build/web
       - run: python3 tool/configure_android.py
       - run: flutter pub get
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
-          name: MinhCanhMobileV311-APK
+          name: MinhCanhMobileV312-APK
           path: build/app/outputs/flutter-apk/app-release.apk
