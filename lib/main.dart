@@ -5020,6 +5020,8 @@ class _DebtAdjustmentPageState extends State<DebtAdjustmentPage> {
   final amount = TextEditingController();
   final note = TextEditingController();
   bool increase = false;
+  bool isPayment=true;
+  String paymentMethod='cash';
   bool saving = false;
 
   int get amountValue => int.tryParse(amount.text) ?? 0;
@@ -5079,6 +5081,10 @@ class _DebtAdjustmentPageState extends State<DebtAdjustmentPage> {
             onSelectionChanged: (value) =>
                 setState(() => increase = value.first),
           ),
+          if(!increase)...[
+            SwitchListTile(title:const Text('Có thu / trả tiền thực tế'),subtitle:const Text('Tắt nếu chỉ điều chỉnh số nợ, không có tiền thu/chi'),value:isPayment,onChanged:(v)=>setState(()=>isPayment=v)),
+            if(isPayment)DropdownButtonFormField<String>(initialValue:paymentMethod,decoration:const InputDecoration(labelText:'Phương thức thanh toán'),items:const [DropdownMenuItem(value:'cash',child:Text('Tiền mặt')),DropdownMenuItem(value:'transfer',child:Text('Chuyển khoản'))],onChanged:(v)=>setState(()=>paymentMethod=v!)),
+          ],
           const SizedBox(height: 16),
           TextField(
             controller: amount,
@@ -5126,6 +5132,7 @@ class _DebtAdjustmentPageState extends State<DebtAdjustmentPage> {
         increase: increase,
         currentDebt: widget.currentDebt,
         note: note.text,
+        isPayment:!increase&&isPayment, paymentMethod:paymentMethod,
       );
       if (mounted) Navigator.pop(context, true);
     } catch (e) {

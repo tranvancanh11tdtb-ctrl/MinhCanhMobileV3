@@ -32,6 +32,7 @@ class RemoteBridge extends ChangeNotifier {
   }
   Future<void> pair(String code) async {
     final result=await _post('/api/pair',{'code':code});
+    if(result['protocol']!=null&&result['protocol']!=2)throw StateError('Điện thoại và máy tính khác phiên bản. Nâng cấp điện thoại rồi tải lại trang.');
     _token=result['token'] as String;
     revision=null;latestRevision=null;connected=true;
     await call('dashboard',{},write:false);
@@ -53,7 +54,7 @@ class RemoteBridge extends ChangeNotifier {
     if(write&&busy)throw StateError('Một giao dịch đang xử lý. Vui lòng chờ.');
     if(write&&!connected)throw StateError('Điện thoại đang mất kết nối. Chưa lưu thay đổi.');
     if(write&&pending!=null)throw StateError('Cần kiểm tra lại giao dịch trước khi tạo giao dịch mới.');
-    final request=<String,Object?>{'operation':operation,'arguments':args};
+    final request=<String,Object?>{'operation':operation,'arguments':args,'protocol':2};
     if(write){
       final random=Random.secure();
       request['requestId']=List.generate(24,(_)=>random.nextInt(256).toRadixString(16).padLeft(2,'0')).join();

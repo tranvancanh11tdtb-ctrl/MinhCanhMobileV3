@@ -1732,6 +1732,7 @@ class StoreDb {
     required bool increase,
     required int currentDebt,
     required String note,
+    bool isPayment=false, String paymentMethod='cash', String? occurredAt,
   }) async {
     if (partyType != 'customer' && partyType != 'supplier') {
       throw Exception('Loại công nợ không hợp lệ');
@@ -1746,14 +1747,18 @@ class StoreDb {
     if (!increase && amount > actualDebt) {
       throw Exception('Số tiền giảm không được lớn hơn công nợ hiện tại');
     }
+    if(isPayment&&increase)throw ArgumentError('Thanh toán phải giảm công nợ');
+    if(!['cash','transfer'].contains(paymentMethod))throw ArgumentError('Phương thức không hợp lệ');
+    final when=vietnamWallDate(occurredAt??financeNow()).toIso8601String().replaceAll('Z','');
     final db = await _executor;
-    await db.insert('debt_adjustments', {
+    final adjustmentId=await db.insert('debt_adjustments', {
       'party_type': partyType,
       'party_id': partyId,
       'amount_delta': increase ? amount : -amount,
       'note': note.trim(),
-      'created_at': DateTime.now().toIso8601String(),
+      'created_at': when,
     });
+    if(isPayment)await db.insert('payment_events',{'source_type':partyType,'source_id':adjustmentId,'entry_type':partyType=='customer'?'income':'expense','amount':amount,'payment_method':paymentMethod,'occurred_at':when,'note':note.trim().isEmpty?(partyType=='customer'?'Thu nợ khách hàng':'Trả nợ nhà cung cấp'):note.trim()});
   }
 
   Future<List<Map<String, Object?>>> _localRepairs() async {
@@ -2625,9 +2630,10 @@ class StoreDb {
     required bool increase,
     required int currentDebt,
     required String note,
+    bool isPayment=false, String paymentMethod='cash', String? occurredAt,
   }) async {
-    if(kIsWeb) { await remoteBridge.call('addDebtAdjustment',{'partyType':partyType,'partyId':partyId,'amount':amount,'increase':increase,'currentDebt':currentDebt,'note':note},write:true); return; }
-    return _callLocal<void>(()=>_localAddDebtAdjustment(partyType: partyType, partyId: partyId, amount: amount, increase: increase, currentDebt: currentDebt, note: note), write:true);
+    if(kIsWeb) { await remoteBridge.call('addDebtAdjustment',{'partyType':partyType,'partyId':partyId,'amount':amount,'increase':increase,'currentDebt':currentDebt,'note':note,'isPayment':isPayment,'paymentMethod':paymentMethod,'occurredAt':occurredAt},write:true); return; }
+    return _callLocal<void>(()=>_localAddDebtAdjustment(partyType: partyType, partyId: partyId, amount: amount, increase: increase, currentDebt: currentDebt, note: note,isPayment:isPayment,paymentMethod:paymentMethod,occurredAt:occurredAt), write:true);
   }
   Future<List<Map<String, Object?>>> repairs() async {
     if(kIsWeb) { final value=await remoteBridge.call('repairs',{},write:false); return (value as List).map((r)=>Map<String,Object?>.from(r as Map)).toList(); }
@@ -2769,6 +2775,7 @@ class StoreDb {
     });
   }
   Future<Map<String,Object?>> executeRemote(Map<String,Object?> request) async {
+    if(request['protocol']!=null&&request['protocol']!=2)throw StateError('Phiên bản máy tính không tương thích. Tải lại trang từ điện thoại đã nâng cấp.');
     final operation=request['operation'] as String? ?? '';
     final args=Map<String,Object?>.from(request['arguments'] as Map? ?? {});
     if(['getSetting','setSetting'].contains(operation)) {
@@ -2866,7 +2873,7 @@ case 'customerRepairs': return customerRepairs((args['name'] as String), (args['
 case 'suppliers': return suppliers();
 case 'supplierPurchases': return supplierPurchases((args['name'] as String));
 case 'debtAdjustments': return debtAdjustments((args['partyType'] as String), (args['partyId'] as int));
-case 'addDebtAdjustment': await addDebtAdjustment(partyType: (args['partyType'] as String), partyId: (args['partyId'] as int), amount: (args['amount'] as int), increase: (args['increase'] as bool), currentDebt: (args['currentDebt'] as int), note: (args['note'] as String)); return null;
+case 'addDebtAdjustment': await addDebtAdjustment(partyType: (args['partyType'] as String), partyId: (args['partyId'] as int), amount: (args['amount'] as int), increase: (args['increase'] as bool), currentDebt: (args['currentDebt'] as int), note: (args['note'] as String),isPayment:args['isPayment'] as bool? ?? false,paymentMethod:args['paymentMethod'] as String? ?? 'cash',occurredAt:args['occurredAt'] as String?); return null;
 case 'repairs': return repairs();
 case 'addRepair': await addRepair(customer: (args['customer'] as String), phone: (args['phone'] as String), device: (args['device'] as String), imei: (args['imei'] as String), issue: (args['issue'] as String), amount: (args['amount'] as int), partsCost: (args['partsCost'] as int), paid: (args['paid'] as int), note: (args['note'] as String)); return null;
 case 'updateRepairStatus': await updateRepairStatus((args['id'] as int), (args['status'] as String)); return null;

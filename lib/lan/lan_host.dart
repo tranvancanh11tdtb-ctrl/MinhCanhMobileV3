@@ -58,7 +58,7 @@ class LanHost {
        final body=Map<String,Object?>.from(jsonDecode(utf8.decode(data)) as Map);
        if(req.uri.path=='/api/pair'){
          final token=pairing.exchange(body['code'] as String? ?? '',req.connectionInfo?.remoteAddress.address??'unknown');
-         res.write(jsonEncode({'token':token}));
+         res.write(jsonEncode({'token':token,'protocol':2}));
        }else if(req.uri.path=='/api/call'){
          Map<String,Object?> result;
          try { result=await handler(body); }
