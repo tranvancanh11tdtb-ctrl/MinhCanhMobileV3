@@ -2,6 +2,12 @@
 
 Ứng dụng Flutter quản lý cửa hàng điện thoại, chạy offline bằng SQLite.
 
+## Bản nâng cấp 3.12
+
+Nhánh `agent/v3-12-upgrade` phát triển trên nền 3.11. Bổ sung nhập hàng gọn trên điện thoại/máy tính, lưu tạm, màu và giá vốn từng IMEI, tìm khách, báo cáo nhập–xuất–tồn theo kỳ, Thu–Chi có phân loại và khoản cố định hằng tháng. LAN yêu cầu giao thức tương thích và nút In mở trang chọn máy in.
+
+Xem [ghi chú phát hành 3.12](docs/releases/3.12.md) về kiểm thử, dữ liệu cũ và giới hạn. Workflow **V3.12 upgrade checks** tạo artifact `MinhCanhMobileV312-APK`; APK có giao diện web tích hợp để dùng qua LAN. Cài đè bản 3.11 chỉ được xác nhận khi chứng thư ký trùng nhau; bản dùng thử không đồng nghĩa với bản cài đè.
+
 ## Chức năng V3.10
 
 - Tạo mẫu điện thoại hoặc phụ kiện.
