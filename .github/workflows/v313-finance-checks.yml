@@ -1,0 +1,51 @@
+name: V3.13 finance checks and APK
+
+on:
+  push:
+    branches:
+      - agent/v3-13-capital-guard
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve packages
+        run: flutter pub get
+      - name: Verify LAN pairing
+        run: dart tool/check_pairing.dart
+      - name: Unit and widget tests
+        run: flutter test
+      - name: Analyze Dart and Flutter source
+        run: flutter analyze --no-fatal-infos
+      - name: Generate Android and web projects
+        run: flutter create --platforms android,web --org vn.minhcanhmobile --project-name minh_canh_mobile_v3 .
+      - name: Build integrated desktop web assets
+        run: flutter build web --release --no-web-resources-cdn
+      - name: Add LAN service, Android permissions and embedded web assets
+        run: python3 tool/configure_android.py
+      - name: Resolve packages after embedding assets
+        run: flutter pub get
+      - name: Build Android test APK
+        run: flutter build apk --release
+      - name: Verify APK signature and package
+        shell: bash
+        run: |
+          tools_dir="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "$tools_dir/apksigner" verify --verbose --print-certs build/app/outputs/flutter-apk/app-release.apk
+          "$tools_dir/aapt" dump badging build/app/outputs/flutter-apk/app-release.apk | head -n 3
+      - name: Upload V3.13 test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MinhCanhMobileV313-TEST-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
