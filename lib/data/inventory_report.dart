@@ -41,7 +41,9 @@ extension InventoryPeriodReport on StoreDb {
           after += delta;
         } else if (!date.isBefore(start)) {
           if (delta > 0) {
-            incoming += delta;
+            // Hàng đã mua/trả tiền từ trước thuộc tồn đầu kỳ,
+            // không phải phát sinh nhập mua trong kỳ báo cáo.
+            if (movement['kind'] != 'opening_stock') incoming += delta;
           } else {
             outgoing -= delta;
           }
