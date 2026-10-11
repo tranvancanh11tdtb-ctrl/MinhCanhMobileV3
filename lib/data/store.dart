@@ -853,10 +853,14 @@ class StoreDb {
     required String supplier,
     required int paid,
     required String paymentMethod,
+    bool openingStock = false,
     int? draftId,
     String? completionKey,
   }) async {
     if (items.isEmpty) throw Exception('Hãy thêm ít nhất một sản phẩm');
+    if (openingStock && draftId != null) {
+      throw ArgumentError('Không sử dụng phiếu tạm nhập hàng để bổ sung tồn đầu kỳ');
+    }
     return _nestedTransaction((txn) async {
       final fingerprint = sha256
           .convert(
@@ -866,6 +870,7 @@ class StoreDb {
                 'supplier': supplier,
                 'paid': paid,
                 'paymentMethod': paymentMethod,
+                'openingStock': openingStock,
                 'draftId': draftId,
               }),
             ),
@@ -963,19 +968,21 @@ class StoreDb {
           );
         }
       }
-      if (paid < 0 || paid > purchaseTotal) {
+      if (!openingStock && (paid < 0 || paid > purchaseTotal)) {
         throw Exception('Số tiền đã thanh toán không hợp lệ');
       }
 
       final now = DateTime.now().toIso8601String();
-      final code = 'PN${DateTime.now().millisecondsSinceEpoch}';
-      await _ensureSupplier(txn, supplier);
+      final code = '${openingStock ? 'TD' : 'PN'}${DateTime.now().millisecondsSinceEpoch}';
+      if (!openingStock) await _ensureSupplier(txn, supplier);
       final purchaseId = await txn.insert('purchases', {
         'code': code,
-        'supplier': supplier.trim(),
+        'supplier': openingStock ? '' : supplier.trim(),
         'total': purchaseTotal,
-        'paid': paid,
-        'payment_method': paymentMethod,
+        // Đã trả tiền trước ngày chốt sổ: không tạo chi tiền mới hay công nợ.
+        'paid': openingStock ? purchaseTotal : paid,
+        'payment_method': openingStock ? 'Tồn đầu kỳ' : paymentMethod,
+        'status': openingStock ? 'opening_stock' : 'completed',
         'created_at': now,
       });
 
@@ -1009,7 +1016,7 @@ class StoreDb {
             await txn.insert('inventory_movements', {
               'product_id': productId,
               'serial_id': serialId,
-              'kind': 'purchase',
+              'kind': openingStock ? 'opening_stock' : 'purchase',
               'quantity_delta': 1,
               'reference_type': 'purchase',
               'reference_id': purchaseId,
@@ -1030,7 +1037,7 @@ class StoreDb {
           );
           await txn.insert('inventory_movements', {
             'product_id': productId,
-            'kind': 'purchase',
+            'kind': openingStock ? 'opening_stock' : 'purchase',
             'quantity_delta': quantity,
             'reference_type': 'purchase',
             'reference_id': purchaseId,
@@ -2797,6 +2804,7 @@ class StoreDb {
     required String supplier,
     required int paid,
     required String paymentMethod,
+    bool openingStock = false,
     int? draftId,
     String? completionKey,
   }) async {
@@ -2806,6 +2814,7 @@ class StoreDb {
         'supplier': supplier,
         'paid': paid,
         'paymentMethod': paymentMethod,
+        'openingStock': openingStock,
         'draftId': draftId,
         'completionKey': completionKey,
       }, write: true);
@@ -2817,6 +2826,7 @@ class StoreDb {
         supplier: supplier,
         paid: paid,
         paymentMethod: paymentMethod,
+        openingStock: openingStock,
         draftId: draftId,
         completionKey: completionKey,
       ),
@@ -3986,6 +3996,7 @@ class StoreDb {
           supplier: (args['supplier'] as String),
           paid: (args['paid'] as int),
           paymentMethod: (args['paymentMethod'] as String),
+          openingStock: args['openingStock'] == true,
           draftId: args['draftId'] as int?,
           completionKey: args['completionKey'] as String?,
         );
