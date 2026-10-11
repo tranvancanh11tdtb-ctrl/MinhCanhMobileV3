@@ -41,7 +41,7 @@ jobs:
           gradle = Path('android/app/build.gradle.kts')
           source = gradle.read_text(encoding='utf-8')
           original = 'applicationId = "vn.minhcanhmobile.minh_canh_mobile_v3"'
-          replacement = 'applicationId = "vn.minhcanhmobile.minh_canh_mobile_v3.test2"'
+          replacement = 'applicationId = "vn.minhcanhmobile.minh_canh_mobile_v3.test3"'
           if source.count(original) != 1:
               raise SystemExit('Cannot safely isolate TEST package; expected applicationId not found exactly once')
           gradle.write_text(source.replace(original, replacement), encoding='utf-8')
@@ -49,7 +49,7 @@ jobs:
           xml = manifest.read_text(encoding='utf-8')
           if xml.count('android:label="Minh Cảnh Mobile"') != 1:
               raise SystemExit('Cannot find TEST app label')
-          manifest.write_text(xml.replace('android:label="Minh Cảnh Mobile"', 'android:label="Minh Cảnh TEST 2"'), encoding='utf-8')
+          manifest.write_text(xml.replace('android:label="Minh Cảnh Mobile"', 'android:label="Minh Cảnh TEST 3"'), encoding='utf-8')
           print('Built under separate application ID; user data of original app is not shared.')
           PY
       - name: Resolve packages after embedding assets
@@ -62,10 +62,10 @@ jobs:
           tools_dir="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
           "$tools_dir/apksigner" verify --verbose --print-certs build/app/outputs/flutter-apk/app-release.apk
           "$tools_dir/aapt" dump badging build/app/outputs/flutter-apk/app-release.apk | head -n 3
-          "$tools_dir/aapt" dump badging build/app/outputs/flutter-apk/app-release.apk | grep "package: name='vn.minhcanhmobile.minh_canh_mobile_v3.test2'"
+          "$tools_dir/aapt" dump badging build/app/outputs/flutter-apk/app-release.apk | grep "package: name='vn.minhcanhmobile.minh_canh_mobile_v3.test3'"
       - name: Upload V3.13 test APK
         uses: actions/upload-artifact@v4
         with:
-          name: MinhCanhMobileV3131-OPENING-STOCK-TEST-APK
+          name: MinhCanhMobileV3132-SIXMONTH-FINANCE-TEST-APK
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
