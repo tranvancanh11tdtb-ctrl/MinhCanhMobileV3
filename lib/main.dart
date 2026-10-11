@@ -6187,6 +6187,28 @@ class _SupplierDetailPageState extends State<SupplierDetailPage> {
   }
 }
 
+// Bộ lọc trạng thái dựa trên tồn kho thực tế của sản phẩm. Với máy IMEI,
+// trường stock đã là số máy còn trong kho, không phải tổng IMEI lịch sử.
+bool stocktakeMatchesAvailability(
+  Map<String, Object?> product,
+  String availability,
+  int nearEmptyThreshold,
+) {
+  final stock = (product['stock'] as num? ?? 0).toInt();
+  switch (availability) {
+    case 'out':
+      return stock <= 0;
+    case 'low':
+      return stock > 0 && stock <= nearEmptyThreshold;
+    case 'enough':
+      return stock > nearEmptyThreshold;
+    case 'available':
+      return stock > 0;
+    default:
+      return true;
+  }
+}
+
 class StocktakePage extends StatefulWidget {
   const StocktakePage({super.key});
   @override
@@ -6197,6 +6219,8 @@ class _StocktakePageState extends State<StocktakePage> {
   final searchController = TextEditingController();
   String search = '';
   String category = '';
+  String availability = 'all';
+  int nearEmptyThreshold = 3;
   List<String> categories = [];
 
   @override
@@ -6260,6 +6284,48 @@ class _StocktakePageState extends State<StocktakePage> {
             onChanged: (value) => setState(() => category = value ?? ''),
           ),
         ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DropdownButtonFormField<String>(
+                key: ValueKey('stock-filter-$availability'),
+                initialValue: availability,
+                decoration: const InputDecoration(
+                  labelText: 'Trạng thái hàng hóa',
+                  prefixIcon: Icon(Icons.filter_list),
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'all', child: Text('Tất cả sản phẩm')),
+                  DropdownMenuItem(value: 'out', child: Text('Đã hết hàng (tồn 0)')),
+                  DropdownMenuItem(value: 'low', child: Text('Gần hết hàng')),
+                  DropdownMenuItem(value: 'available', child: Text('Còn hàng (tồn trên 0)')),
+                  DropdownMenuItem(value: 'enough', child: Text('Còn nhiều hơn mức cảnh báo')),
+                ],
+                onChanged: (v) => setState(() => availability = v ?? 'all'),
+              ),
+              if (availability == 'low' || availability == 'enough') ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Expanded(child: Text('Mức cảnh báo gần hết (số lượng):')),
+                    DropdownButton<int>(
+                      value: nearEmptyThreshold,
+                      items: const [1, 2, 3, 5, 10]
+                          .map((value) => DropdownMenuItem(
+                                value: value,
+                                child: Text('$value sản phẩm'),
+                              ))
+                          .toList(),
+                      onChanged: (v) => setState(() => nearEmptyThreshold = v ?? 3),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
         Expanded(
           child: FutureBuilder<List<Map<String, Object?>>>(
             future: StoreDb.instance.products(),
@@ -6276,20 +6342,26 @@ class _StocktakePageState extends State<StocktakePage> {
                     category.isEmpty ||
                     '${product['category']}'.toLowerCase() ==
                         category.toLowerCase();
-                return matchesSearch && matchesCategory;
+                return matchesSearch &&
+                    matchesCategory &&
+                    stocktakeMatchesAvailability(
+                      product,
+                      availability,
+                      nearEmptyThreshold,
+                    );
               }).toList();
               if (rows.isEmpty)
                 return const EmptyState(
-                  Icons.fact_check_outlined,
-                  'Chưa có hàng hóa',
-                  'Hãy tạo và nhập hàng trước khi kiểm kho.',
+                  Icons.filter_alt_off,
+                  'Không có sản phẩm phù hợp',
+                  'Hãy đổi bộ lọc trạng thái, phân loại hoặc từ khóa.',
                 );
               return ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  const Text(
-                    'Tồn kho hiện tại',
-                    style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+                  Text(
+                    'Tồn kho hiện tại • ${rows.length} mặt hàng',
+                    style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 8),
                   ...rows.map(
@@ -6307,9 +6379,14 @@ class _StocktakePageState extends State<StocktakePage> {
                             style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           subtitle: Text(
-                            p['track_imei'] == 1
-                                ? 'Kiểm theo số lượng và danh sách IMEI'
-                                : 'Kiểm và cân bằng lại số lượng',
+                            ((p['stock'] as num? ?? 0).toInt() == 0
+                                    ? 'Đã hết hàng'
+                                    : (p['stock'] as num).toInt() <= nearEmptyThreshold
+                                        ? 'Gần hết hàng'
+                                        : 'Còn hàng') +
+                                (p['track_imei'] == 1
+                                    ? ' • Kiểm theo IMEI'
+                                    : ' • Kiểm số lượng'),
                           ),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
