@@ -454,6 +454,8 @@ extension FinanceStore on StoreDb {
       final start = '${payload['start_month'] ?? ''}';
       if (!RegExp(r'^\d{4}-(0[1-9]|1[0-2])$').hasMatch(start))
         throw ArgumentError('Tháng bắt đầu không hợp lệ');
+      if (![1, 3, 6, 12].contains(payload['interval_months'] ?? 1))
+        throw ArgumentError('Chu kỳ thanh toán phải là 1, 3, 6 hoặc 12 tháng');
       if (![
         'business',
         'personal',
@@ -496,9 +498,13 @@ extension FinanceStore on StoreDb {
         final data = Map<String, Object?>.from(
           jsonDecode(row['payload'] as String) as Map,
         );
-        if ('${data['start_month']}'.compareTo(key) > 0 ||
-            data['active'] == false)
-          continue;
+        final startMonth = '${data['start_month']}';
+        if (startMonth.compareTo(key) > 0 || data['active'] == false) continue;
+        final startYear = int.parse(startMonth.substring(0, 4));
+        final startMonthNumber = int.parse(startMonth.substring(5, 7));
+        final monthOffset = (year - startYear) * 12 + month - startMonthNumber;
+        final interval = data['interval_months'] as int? ?? 1;
+        if (monthOffset % interval != 0) continue;
         final last = DateTime(year, month + 1, 0).day;
         final day = (data['day'] as int).clamp(1, last);
         final payment = await db.query(
@@ -506,11 +512,20 @@ extension FinanceStore on StoreDb {
           where: 'template_id=? AND month=?',
           whereArgs: [row['id'], key],
         );
+        final mark = await db.query(
+          'app_settings',
+          columns: ['setting_value'],
+          where: 'setting_key=?',
+          whereArgs: ['recurring_reconciled_${row['id']}_$key'],
+        );
+        final alreadyRecorded = mark.isNotEmpty && mark.single['setting_value'] == '1';
         rows.add({
           ...data,
+          'interval_months': interval,
           'id': row['id'],
           'due_date': '$key-${day.toString().padLeft(2, '0')}',
-          'paid': payment.isNotEmpty,
+          'paid': payment.isNotEmpty || alreadyRecorded,
+          'paid_without_entry': alreadyRecorded,
           'cash_entry_id': payment.isEmpty
               ? null
               : payment.single['cash_entry_id'],
@@ -549,6 +564,9 @@ extension FinanceStore on StoreDb {
         (r) => r['id'] == id,
         orElse: () => throw StateError('Không tìm thấy khoản định kỳ'),
       );
+      if (row['paid_without_entry'] == true) {
+        throw StateError('Kỳ này đã xác nhận thanh toán trước đó; không được ghi chi trùng');
+      }
       final entry = await saveCashEntry(
         type: 'expense',
         scope: '${row['scope']}',
@@ -564,6 +582,53 @@ extension FinanceStore on StoreDb {
         'cash_entry_id': entry,
       });
       return entry;
+    }, write: true);
+  }
+
+
+  /// Đánh dấu đã trả hoặc đã hạch toán trước đó, KHÔNG sinh giao dịch tiền.
+  /// Chỉ sử dụng nếu khoản này đã nằm trong số dư đầu kỳ hoặc đã có bút toán
+  /// thu/chi tương ứng; nếu chưa có thì phải ghi chi thực tế thay thế.
+  Future<void> markRecurringPaidNoEntry(int id, int year, int month) async {
+    if (kIsWeb) {
+      await remoteBridge.call('markRecurringPaidNoEntry', {
+        'id': id, 'year': year, 'month': month,
+      }, write: true);
+      return;
+    }
+    return _callLocal(() async {
+      final db = await _executor;
+      final key = '$year-${month.toString().padLeft(2, '0')}';
+      final rows = await recurringExpenses(year, month);
+      final target = rows.where((r) => r['id'] == id);
+      if (target.isEmpty) throw StateError('Khoản này không đến hạn trong tháng đã chọn');
+      if (target.single['cash_entry_id'] != null) {
+        throw StateError('Kỳ này đã ghi chi từ lịch thanh toán');
+      }
+      await db.insert('app_settings', {
+        'setting_key': 'recurring_reconciled_${id}_$key',
+        'setting_value': '1',
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    }, write: true);
+  }
+
+  Future<void> unmarkRecurringPaidNoEntry(int id, int year, int month) async {
+    if (kIsWeb) {
+      await remoteBridge.call('unmarkRecurringPaidNoEntry', {
+        'id': id, 'year': year, 'month': month,
+      }, write: true);
+      return;
+    }
+    return _callLocal(() async {
+      final db = await _executor;
+      final key = '$year-${month.toString().padLeft(2, '0')}';
+      final rows = await recurringExpenses(year, month);
+      if (!rows.any((r) => r['id'] == id && r['paid_without_entry'] == true)) {
+        throw StateError('Kỳ này chưa có xác nhận đã trả trước đó');
+      }
+      await db.delete('app_settings',
+        where: 'setting_key=?',
+        whereArgs: ['recurring_reconciled_${id}_$key']);
     }, write: true);
   }
 
