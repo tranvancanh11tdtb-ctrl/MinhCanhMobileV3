@@ -3676,6 +3676,8 @@ class StoreDb {
     'saveCashEntry',
     'saveRecurringExpense',
     'payRecurringExpense',
+    'markRecurringPaidNoEntry',
+    'unmarkRecurringPaidNoEntry',
     'deleteRecurringExpense',
     'savePurchaseDraft',
     'deletePurchaseDraft',
@@ -4200,6 +4202,14 @@ class StoreDb {
           args['paymentMethod'] as String,
           args['occurredAt'] as String,
         );
+      case 'markRecurringPaidNoEntry':
+        await markRecurringPaidNoEntry(
+          args['id'] as int, args['year'] as int, args['month'] as int);
+        return null;
+      case 'unmarkRecurringPaidNoEntry':
+        await unmarkRecurringPaidNoEntry(
+          args['id'] as int, args['year'] as int, args['month'] as int);
+        return null;
       case 'deleteRecurringExpense':
         await deleteRecurringExpense(args['id'] as int);
         return null;
