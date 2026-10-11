@@ -2453,6 +2453,18 @@ class StoreDb {
       COALESCE(SUM(CASE WHEN status NOT IN ('completed','returned','cancelled') THEN 1 ELSE 0 END),0) pending
       FROM repairs''');
     final finance = await financeSummary(DateTime(2000), DateTime(2100));
+    // Dòng tiền trên Tổng quan ưu tiên tính từ ngày chốt quỹ đầu kỳ.
+    // Nhập hàng từ trước đã trả tiền không được hiểu là số dư âm hiện tại.
+    final startSetting = await getSetting('capital_guard_started_at');
+    final startOfCashFlow = startSetting == null || startSetting.trim().isEmpty
+        ? DateTime(2000)
+        : vietnamWallDate(startSetting);
+    final trackedFinance = startSetting == null || startSetting.trim().isEmpty
+        ? finance
+        : await financeSummary(
+            startOfCashFlow,
+            vietnamWallDate(financeNow()).add(const Duration(minutes: 1)),
+          );
     final debtAdjustmentRows = await db.rawQuery('''SELECT
       COALESCE(SUM(amount_delta),0) amount
       FROM debt_adjustments WHERE party_type='customer' ''');
@@ -2474,7 +2486,8 @@ class StoreDb {
           n(sale, 'debt') +
           n(repair, 'debt') +
           n(debtAdjustmentRows.single, 'amount'),
-      'fund': finance['cash_flow']!,
+      'fund': trackedFinance['cash_flow']!,
+      'fund_since_opening': startSetting == null || startSetting.trim().isEmpty ? 0 : 1,
       'invoices': n(sale, 'invoices'),
       'pending_repairs': n(repair, 'pending'),
       'stock_value': n(stockRows.single, 'stock_value'),
