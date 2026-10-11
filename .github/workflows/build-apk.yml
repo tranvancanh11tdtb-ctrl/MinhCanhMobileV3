@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - main
+      - agent/v3-13-capital-guard
 
 permissions:
   contents: write
