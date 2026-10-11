@@ -74,6 +74,15 @@ void main() {
         {3000000, 3100000});
     expect((await store.product(cableId))['quantity'], 3);
     expect((await store.product(cableId))['avg_cost'], 50000);
+    final period = await store.productReport(DateTime(2000), DateTime(2100));
+    final openingPhone = period.singleWhere((r) => r['id'] == phoneId);
+    final openingCable = period.singleWhere((r) => r['id'] == cableId);
+    expect(openingPhone['opening_stock'], 2);
+    expect(openingPhone['incoming'], 0);
+    expect(openingPhone['closing_stock'], 2);
+    expect(openingCable['opening_stock'], 3);
+    expect(openingCable['incoming'], 0);
+    expect(openingCable['closing_stock'], 3);
     final ledger = await store.financeLedger(DateTime(2000), DateTime(2100));
     expect(ledger, isEmpty);
     final after = await store.financeSummary(DateTime(2000), DateTime(2100));
