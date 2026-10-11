@@ -2,6 +2,12 @@
 
 Ứng dụng Flutter quản lý cửa hàng điện thoại, chạy offline bằng SQLite.
 
+## Bản nâng cấp 3.13 — Bảo vệ vốn & ngân sách
+
+Nhánh `agent/v3-13-capital-guard` kế thừa 3.12, thêm màn **Nhiều hơn → Bảo vệ vốn & ngân sách**. Dữ liệu hàng tồn, IMEI và giá vốn cũ được giữ nguyên, không nhập lại vốn hàng. Người dùng tự chốt tiền mặt và số dư ngân hàng ban đầu, thiết lập vốn sàn, ngân sách gia đình và dự phòng; báo cáo ghi riêng lợi nhuận và dòng tiền. Bản thử nghiệm chỉ nên cài trên thiết bị thử hoặc khi chữ ký tương thích với APK đang dùng. **Không gỡ ứng dụng đang lưu dữ liệu nếu chưa sao lưu.**
+
+Xem [ghi chú nâng cấp 3.13](docs/releases/3.13.md). Workflow `V3.13 finance checks and APK` tạo APK thử nghiệm khi các bước kiểm thử thành công.
+
 ## Bản nâng cấp 3.12
 
 Nhánh `agent/v3-12-upgrade` phát triển trên nền 3.11. Bổ sung nhập hàng gọn trên điện thoại/máy tính, lưu tạm, màu và giá vốn từng IMEI, tìm khách, báo cáo nhập–xuất–tồn theo kỳ, Thu–Chi có phân loại và khoản cố định hằng tháng. LAN yêu cầu giao thức tương thích và nút In mở trang chọn máy in.
