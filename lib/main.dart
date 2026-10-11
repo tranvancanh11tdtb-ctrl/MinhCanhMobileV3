@@ -36,6 +36,7 @@ part 'features/upgrade_ui.dart';
 part 'features/purchase_ui.dart';
 part 'features/customer_picker.dart';
 part 'features/finance_ui.dart';
+part 'features/capital_guard.dart';
 part 'data/store.dart';
 part 'data/purchase_drafts.dart';
 part 'data/finance_store.dart';
@@ -3703,6 +3704,7 @@ class MorePage extends StatelessWidget {
             MaterialPageRoute(builder: (_) => const WarrantiesPage()),
           ),
         ),
+        MenuAction(Icons.shield_outlined, 'Bảo vệ vốn & ngân sách', () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CapitalGuardPage()))),
         MenuAction(Icons.savings, 'Sổ quỹ', () async {
           await Navigator.push(
             context,
