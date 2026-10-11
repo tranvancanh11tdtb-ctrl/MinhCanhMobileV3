@@ -3625,6 +3625,13 @@ class MorePage extends StatelessWidget {
           );
           if (ok == true) onChanged();
         }),
+        MenuAction(Icons.inventory_outlined, 'Bổ sung tồn đầu kỳ (đã trả tiền)', () async {
+          final ok = await Navigator.push<bool>(
+            context,
+            MaterialPageRoute(builder: (_) => const PurchaseForm(openingStock: true)),
+          );
+          if (ok == true) onChanged();
+        }),
         MenuAction(Icons.fact_check, 'Kiểm kho', () async {
           await Navigator.push(
             context,
