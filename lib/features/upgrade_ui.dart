@@ -619,7 +619,7 @@ class DashboardDetailPage extends StatelessWidget {
     appBar: AppBar(
       title: Text(
         metric == 'fund'
-            ? 'Chi tiết dòng tiền ròng'
+            ? 'Chi tiết thu – chi tiền'
             : metric == 'profit'
             ? 'Chi tiết lợi nhuận'
             : 'Chi tiết doanh thu',
@@ -631,6 +631,7 @@ class DashboardDetailPage extends StatelessWidget {
         StoreDb.instance.repairs(),
         StoreDb.instance.financeLedger(DateTime(2000), DateTime(2100)),
         StoreDb.instance.dashboard(),
+        StoreDb.instance.getSetting('capital_guard_started_at').then((v) => v ?? ''),
       ]),
       builder: (context, snap) {
         if (snap.hasError)
@@ -641,6 +642,10 @@ class DashboardDetailPage extends StatelessWidget {
         final repairs = snap.data![1] as List<Map<String, Object?>>;
         final cash = snap.data![2] as List<Map<String, Object?>>;
         final d = snap.data![3] as Map<String, int>;
+        final openingSetting = snap.data![4] as String;
+        final openingDate = openingSetting.trim().isEmpty
+            ? null
+            : vietnamWallDate(openingSetting);
         num n(Map<String, Object?> r, String k) => r[k] as num? ?? 0;
         return ListView(
           padding: const EdgeInsets.all(16),
@@ -709,6 +714,15 @@ class DashboardDetailPage extends StatelessWidget {
                   ),
                 ),
             if (metric == 'fund' || metric == 'profit') ...[
+              if (metric == 'fund') ...[
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Text(openingDate == null
+                      ? 'Tổng thu trừ chi của các giao dịch đã nhập từ trước tới nay. Không phải số dư hiện có.'
+                      : 'Tổng thu trừ chi từ lúc chốt số dư đầu kỳ; tiền thực có xem tại Bảo vệ vốn & ngân sách.',
+                  ),
+                ),
+              ],
               const Divider(),
               const Text(
                 'Thu / chi khác',
@@ -716,8 +730,12 @@ class DashboardDetailPage extends StatelessWidget {
               ),
               for (final r in cash.where(
                 (r) =>
-                    metric == 'fund' ||
-                    (r['source_type'] == 'manual' &&
+                    (metric == 'fund' &&
+                        (openingDate == null ||
+                            !vietnamWallDate('${r['occurred_at']}')
+                                .isBefore(openingDate))) ||
+                    (metric == 'profit' &&
+                        r['source_type'] == 'manual' &&
                         ['business', 'business_interest'].contains(r['scope'])),
               ))
                 ListTile(

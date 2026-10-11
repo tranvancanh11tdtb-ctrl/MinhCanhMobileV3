@@ -1,8 +1,9 @@
 part of '../main.dart';
 
 class PurchaseForm extends StatefulWidget {
-  const PurchaseForm({super.key, this.initialProduct});
+  const PurchaseForm({super.key, this.initialProduct, this.openingStock = false});
   final Map<String, Object?>? initialProduct;
+  final bool openingStock;
   @override
   State<PurchaseForm> createState() => _PurchaseFormState();
 }
@@ -276,6 +277,11 @@ class _PurchaseFormState extends State<PurchaseForm> {
   Future<void> complete() async {
     if (saving) return;
     if (!await flushQuantities() || !mounted) return;
+    if (widget.openingStock) {
+      final agreed = await confirm(context, 'Bổ sung hàng đã thanh toán',
+        'Chỉ dùng cho hàng đã mua và trả tiền từ trước. App cộng kho, không trừ tiền mặt/ngân hàng, không ghi nợ hay lợi nhuận. Tiếp tục?');
+      if (!agreed || !mounted) return;
+    }
     setState(() => saving = true);
     try {
       await StoreDb.instance.completeMultiPurchase(
@@ -283,6 +289,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
         supplier: supplier.text,
         paid: int.tryParse(paid.text) ?? 0,
         paymentMethod: payment,
+        openingStock: widget.openingStock,
         draftId: draftId,
         completionKey: completionKey,
       );
@@ -564,13 +571,16 @@ class _PurchaseFormState extends State<PurchaseForm> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: Text(draftId == null ? 'Nhập hàng' : 'Phiếu tạm $draftId'),
+      title: Text(widget.openingStock
+        ? 'Bổ sung tồn đầu kỳ'
+        : (draftId == null ? 'Nhập hàng' : 'Phiếu tạm $draftId')),
       actions: [
-        IconButton(
-          tooltip: 'Phiếu lưu tạm',
-          onPressed: saving ? null : openDrafts,
-          icon: const Icon(Icons.history),
-        ),
+        if (!widget.openingStock)
+          IconButton(
+            tooltip: 'Phiếu lưu tạm',
+            onPressed: saving ? null : openDrafts,
+            icon: const Icon(Icons.history),
+          ),
       ],
     ),
     bottomNavigationBar: SafeArea(
@@ -598,19 +608,19 @@ class _PurchaseFormState extends State<PurchaseForm> {
             const SizedBox(height: 8),
             Row(
               children: [
-                Expanded(
-                  child: OutlinedButton.icon(
+                if (!widget.openingStock) ...[
+                  Expanded(child: OutlinedButton.icon(
                     onPressed: saving ? null : saveDraft,
                     icon: const Icon(Icons.save_outlined),
                     label: const Text('Lưu tạm'),
-                  ),
-                ),
-                const SizedBox(width: 10),
+                  )),
+                  const SizedBox(width: 10),
+                ],
                 Expanded(
                   child: FilledButton.icon(
                     onPressed: saving ? null : complete,
                     icon: const Icon(Icons.check),
-                    label: Text(saving ? 'Đang lưu…' : 'Hoàn thành'),
+                    label: Text(saving ? 'Đang lưu…' : (widget.openingStock ? 'Ghi tồn đầu kỳ' : 'Hoàn thành')),
                   ),
                 ),
               ],
@@ -631,6 +641,16 @@ class _PurchaseFormState extends State<PurchaseForm> {
                   TextButton(onPressed: load, child: const Text('Thử lại')),
                 ],
               ),
+            if (widget.openingStock)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                margin: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                decoration: BoxDecoration(color: const Color(0xffe9f7ed), borderRadius: BorderRadius.circular(10)),
+                child: const Text(
+                  'HÀNG ĐÃ THANH TOÁN TRƯỚC: nhập các sản phẩm chưa có trong kho với IMEI, màu, giá vốn và số lượng. App chỉ bổ sung hàng tồn, không trừ tiền hay phát sinh nợ/lãi. Đừng nhập trùng hàng đã có.',
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.all(10),
               child: Wrap(
@@ -648,7 +668,7 @@ class _PurchaseFormState extends State<PurchaseForm> {
                     icon: const Icon(Icons.add),
                     label: const Text('Hàng mới'),
                   ),
-                  SizedBox(
+                  if (!widget.openingStock) SizedBox(
                     width: wide ? 260 : box.maxWidth - 20,
                     child: TextField(
                       controller: supplier,
@@ -678,11 +698,11 @@ class _PurchaseFormState extends State<PurchaseForm> {
                       ),
                     ),
                   ),
-                  SizedBox(
+                  if (!widget.openingStock) SizedBox(
                     width: wide ? 180 : (box.maxWidth - 28) / 2,
                     child: number(paid, 'Đã thanh toán'),
                   ),
-                  SizedBox(
+                  if (!widget.openingStock) SizedBox(
                     width: wide ? 180 : (box.maxWidth - 28) / 2,
                     child: DropdownButtonFormField<String>(
                       initialValue: payment,

@@ -293,17 +293,20 @@ class _CashBookPageState extends State<CashBookPage> {
                                 '${r['title']} • ${vnd(r['amount'] as int)}',
                               ),
                               subtitle: Text(
-                                'Hạn ${r['due_date']} • ${r['paid'] == true ? 'Đã thanh toán' : 'Chưa thanh toán'}',
+                                'Hạn ${r['due_date']} • ${r['paid_without_entry'] == true ? 'Đã trả trước (không ghi chi thêm)' : (r['paid'] == true ? 'Đã thanh toán & ghi sổ' : 'Chưa thanh toán')} • ${r['interval_months'] == 6 ? '6 tháng/lần' : 'Hàng tháng'}',
                               ),
                               onTap: () => recurringForm(r),
-                              trailing: r['paid'] == true
-                                  ? const Icon(
-                                      Icons.check_circle,
-                                      color: Colors.green,
+                              trailing: r['paid_without_entry'] == true
+                                  ? IconButton(
+                                      tooltip: 'Bỏ xác nhận đã thanh toán (không sửa sổ quỹ)',
+                                      onPressed: () => undoReconciliation(r),
+                                      icon: const Icon(Icons.undo, color: Colors.green),
                                     )
+                                  : r['paid'] == true
+                                  ? const Icon(Icons.check_circle, color: Colors.green)
                                   : TextButton(
                                       onPressed: () => pay(r),
-                                      child: const Text('Thanh toán'),
+                                      child: const Text('Đã trả / Ghi chi'),
                                     ),
                             ),
                           ),
@@ -335,35 +338,49 @@ class _CashBookPageState extends State<CashBookPage> {
     final method = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Thanh toán ${row['title']}'),
+        title: Text('Xác nhận ${row['title']}'),
         content: Text(
-          'Ghi chi ${vnd(row['amount'] as int)} cho tháng ${period.anchor.month}/${period.anchor.year} ngay hôm nay.',
+          'Số tiền: ${vnd(row['amount'] as int)}.\\n\\n'
+          'Nếu khoản này ĐÃ được trừ trước ngày chốt số dư hoặc ĐÃ ghi ở Thu–Chi, chọn “Đã trả trước”. '
+          'Chọn “Ghi chi tiền mặt/chuyển khoản” CHỈ KHI chưa ghi khoản chi này trong app.',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Hủy'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'cash'),
-            child: const Text('Tiền mặt'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, 'transfer'),
-            child: const Text('Chuyển khoản'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Hủy')),
+          OutlinedButton(onPressed: () => Navigator.pop(ctx, 'already'),
+            child: const Text('Đã trả trước')),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'cash'),
+            child: const Text('Ghi chi tiền mặt')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, 'transfer'),
+            child: const Text('Ghi chi chuyển khoản')),
         ],
       ),
     );
     if (method == null) return;
     try {
-      await StoreDb.instance.payRecurringExpense(
-        row['id'] as int,
-        period.anchor.year,
-        period.anchor.month,
-        method,
-        financeNow(),
-      );
+      if (method == 'already') {
+        final ok = await confirm(context, 'Đã trả trước – không trừ tiền',
+          'Chỉ xác nhận kỳ này đã thanh toán, không ghi thêm tiền chi. '
+          'Đúng khi tiền đã nằm trong số dư đầu kỳ hoặc khoản chi đã được ghi trước đó. Tiếp tục?');
+        if (!ok) return;
+        await StoreDb.instance.markRecurringPaidNoEntry(
+          row['id'] as int, period.anchor.year, period.anchor.month);
+      } else {
+        await StoreDb.instance.payRecurringExpense(
+          row['id'] as int, period.anchor.year, period.anchor.month,
+          method, financeNow());
+      }
+      reload();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> undoReconciliation(Map<String, Object?> row) async {
+    if (!await confirm(context, 'Hoàn tác xác nhận',
+      'Bỏ trạng thái đã trả trước của kỳ này? Không xóa hoặc sửa giao dịch tiền.')) return;
+    try {
+      await StoreDb.instance.unmarkRecurringPaidNoEntry(
+        row['id'] as int, period.anchor.year, period.anchor.month);
       reload();
     } catch (e) {
       if (mounted) showError(context, e);
@@ -601,7 +618,21 @@ class _RecurringExpenseFormState extends State<RecurringExpenseForm> {
       amount = TextEditingController(text: '${widget.entry?['amount'] ?? ''}'),
       day = TextEditingController(text: '${widget.entry?['day'] ?? 1}');
   late String scope = '${widget.entry?['scope'] ?? 'business'}';
+  late int intervalMonths = widget.entry?['interval_months'] as int? ?? 1;
+  late String firstDueMonth = '${widget.entry?['start_month'] ?? '${widget.anchor.year}-${widget.anchor.month.toString().padLeft(2, '0')}'}';
   bool saving = false;
+
+  Future<void> chooseDueMonth() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime.parse('$firstDueMonth-01'),
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100, 12, 31),
+      helpText: 'Chọn tháng có kỳ thanh toán đầu tiên',
+    );
+    if (picked != null && mounted) setState(() => firstDueMonth =
+      '${picked.year}-${picked.month.toString().padLeft(2, '0')}');
+  }
   @override
   void dispose() {
     title.dispose();
@@ -625,7 +656,9 @@ class _RecurringExpenseFormState extends State<RecurringExpenseForm> {
           controller: amount,
           keyboardType: TextInputType.number,
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          decoration: const InputDecoration(labelText: 'Số tiền mỗi tháng *'),
+          decoration: InputDecoration(labelText: intervalMonths == 1
+              ? 'Số tiền phải trả mỗi tháng *'
+              : 'Tổng số tiền phải trả mỗi kỳ *'),
         ),
         const SizedBox(height: 12),
         TextField(
@@ -634,6 +667,22 @@ class _RecurringExpenseFormState extends State<RecurringExpenseForm> {
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           decoration: const InputDecoration(labelText: 'Ngày đến hạn (1–31)'),
         ),
+        const SizedBox(height: 12),
+        DropdownButtonFormField<int>(
+          initialValue: intervalMonths,
+          decoration: const InputDecoration(labelText: 'Chu kỳ thanh toán'),
+          items: const [
+            DropdownMenuItem(value: 1, child: Text('Hằng tháng')),
+            DropdownMenuItem(value: 3, child: Text('3 tháng/lần')),
+            DropdownMenuItem(value: 6, child: Text('6 tháng/lần')),
+            DropdownMenuItem(value: 12, child: Text('12 tháng/lần')),
+          ],
+          onChanged: (v) => setState(() => intervalMonths = v ?? 1),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(onPressed: chooseDueMonth,
+          icon: const Icon(Icons.calendar_month),
+          label: Text('Tháng đến hạn đầu tiên: $firstDueMonth')),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
           key: ValueKey(scope),
@@ -654,7 +703,7 @@ class _RecurringExpenseFormState extends State<RecurringExpenseForm> {
         ),
         const SizedBox(height: 12),
         const Text(
-          'Lặp mỗi tháng. Tháng ngắn dùng ngày cuối tháng. Khoản đến hạn chưa được ghi chi cho đến khi bấm Thanh toán.',
+          'Khoản định kỳ chỉ xuất hiện trong tháng đến hạn theo chu kỳ. Đổi tiền nhà sang 6 tháng/lần thì nhập TỔNG tiền trả cho 6 tháng và chọn đúng tháng đến hạn tiếp theo. Khoản chưa thanh toán sẽ không tự động ghi chi.',
         ),
         const SizedBox(height: 20),
         FilledButton(
@@ -681,9 +730,8 @@ class _RecurringExpenseFormState extends State<RecurringExpenseForm> {
           'amount': int.tryParse(amount.text) ?? 0,
           'day': int.tryParse(day.text) ?? 0,
           'scope': scope,
-          'start_month':
-              widget.entry?['start_month'] ??
-              '${widget.anchor.year}-${widget.anchor.month.toString().padLeft(2, '0')}',
+          'interval_months': intervalMonths,
+          'start_month': firstDueMonth,
         },
       );
       if (mounted) Navigator.pop(context, true);
