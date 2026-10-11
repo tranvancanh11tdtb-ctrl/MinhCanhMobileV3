@@ -773,7 +773,9 @@ class DashboardPage extends StatelessWidget {
                 ),
               ),
               MetricCard(
-                'Dòng tiền ròng',
+                d['fund_since_opening'] == 1
+                    ? 'Thu – chi từ lúc chốt quỹ'
+                    : 'Thu – chi lũy kế',
                 vnd(d['fund']!),
                 Icons.savings,
                 Colors.teal,
