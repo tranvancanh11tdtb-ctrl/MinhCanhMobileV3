@@ -913,11 +913,19 @@ class _ProductsPageState extends State<ProductsPage> {
     children: [
       PageHeader(
         'Hàng hóa',
-        action: IconButton(
-          tooltip: 'Thêm hàng hóa',
-          icon: const Icon(Icons.add_circle, size: 34),
-          onPressed: _add,
-        ),
+        action: Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(
+            tooltip: 'In tem nhiều sản phẩm',
+            icon: const Icon(Icons.print_outlined, size: 28),
+            onPressed: () => Navigator.push(context,
+              MaterialPageRoute(builder: (_) => const BulkLabelSelectionPage())),
+          ),
+          IconButton(
+            tooltip: 'Thêm hàng hóa',
+            icon: const Icon(Icons.add_circle, size: 34),
+            onPressed: _add,
+          ),
+        ]),
       ),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -9090,7 +9098,11 @@ class ReceiptPrinter {
     );
     final copies = (savedCopies ?? 1).clamp(1, 3);
     final png = await render(context, receipt);
-    final bytes = await thermalBytes(png);
+    final lanLanguage =
+        await StoreDb.instance.getSetting('printer_lan_language') ?? 'tspl';
+    final bytes = transport == 'lan' && lanLanguage == 'tspl'
+        ? TsplPrinter.encodeRaster(png)
+        : await thermalBytes(png);
 
     if (transport == 'bluetooth') {
       final mac =
@@ -9256,6 +9268,7 @@ class PrinterSettingsPage extends StatefulWidget {
 
 class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
   String transport = 'lan';
+  String lanLanguage = 'tspl';
   String bluetoothMac = '';
   String bluetoothName = '';
   int copies = 1;
@@ -9281,6 +9294,8 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
 
   Future<void> load() async {
     transport = await StoreDb.instance.getSetting('printer_transport') ?? 'lan';
+    lanLanguage =
+        await StoreDb.instance.getSetting('printer_lan_language') ?? 'tspl';
     ip.text = await StoreDb.instance.getSetting('printer_lan_ip') ?? '';
     port.text = await StoreDb.instance.getSetting('printer_lan_port') ?? '9100';
     bluetoothMac =
@@ -9358,6 +9373,22 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                             labelText: 'Cổng in',
                             hintText: '9100',
                           ),
+                        ),
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<String>(
+                          initialValue: lanLanguage,
+                          isExpanded: true,
+                          decoration: const InputDecoration(
+                            labelText: 'Ngôn ngữ máy in LAN',
+                          ),
+                          items: const [
+                            DropdownMenuItem(value: 'tspl',
+                              child: Text('TSPL – K80 đã thử thành công')),
+                            DropdownMenuItem(value: 'escpos',
+                              child: Text('ESC/POS – Máy hóa đơn khác')),
+                          ],
+                          onChanged: (value) => setState(() =>
+                              lanLanguage = value ?? 'tspl'),
                         ),
                       ],
                     ),
@@ -9494,6 +9525,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
       throw Exception('Hãy chọn máy in Bluetooth');
     }
     await StoreDb.instance.setSetting('printer_transport', transport);
+    await StoreDb.instance.setSetting('printer_lan_language', lanLanguage);
     await StoreDb.instance.setSetting('printer_lan_ip', ip.text.trim());
     await StoreDb.instance.setSetting('printer_lan_port', port.text.trim());
     await StoreDb.instance.setSetting('printer_bluetooth_mac', bluetoothMac);
