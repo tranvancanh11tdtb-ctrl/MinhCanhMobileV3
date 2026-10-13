@@ -29,6 +29,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'scanner_page.dart';
+import 'tspl_printer.dart';
 import 'vietqr.dart';
 import 'features/device_unlock.dart';
 
@@ -37,6 +38,7 @@ part 'features/purchase_ui.dart';
 part 'features/customer_picker.dart';
 part 'features/finance_ui.dart';
 part 'features/capital_guard.dart';
+part 'bulk_labels.dart';
 part 'data/store.dart';
 part 'data/purchase_drafts.dart';
 part 'data/finance_store.dart';
@@ -1622,6 +1624,7 @@ class _ProductDetailState extends State<ProductDetail> {
                   .where((value) => value.isNotEmpty)
                   .join(' • '),
               code: '${product['code']}',
+              productCode: '${product['code']}',
               price: (product['sale_price'] as num).toInt(),
               isImei: false,
             ),
@@ -7912,27 +7915,39 @@ class ProductLabelData {
     required this.code,
     required this.price,
     required this.isImei,
+    this.productCode = '',
   });
 
   final String productName;
   final String detail;
   final String code;
+  final String productCode;
   final int price;
   final bool isImei;
+
+  String codeFor(String mode) {
+    if (mode == 'none') return '';
+    if (mode == 'sku') {
+      if (productCode.trim().isNotEmpty) return productCode.trim();
+      return isImei ? '' : code.trim();
+    }
+    return code.trim();
+  }
 }
 
 ProductLabelData labelForSerial(
-  Map<String, Object?> product,
-  Map<String, Object?> serial,
-) {
-  final details = [product['capacity'], serial['color']]
-      .map((value) => '${value ?? ''}'.trim())
+    Map<String, Object?> product, Map<String, Object?> serial) {
+  final details = [
+    product['capacity'],
+    serial['color'],
+  ].map((value) => '${value ?? ''}'.trim())
       .where((value) => value.isNotEmpty)
       .join(' • ');
   return ProductLabelData(
     productName: '${product['name']}',
     detail: details,
     code: '${serial['imei']}',
+    productCode: '${product['code'] ?? ''}',
     price: (product['sale_price'] as num).toInt(),
     isImei: true,
   );
@@ -7943,90 +7958,148 @@ class LabelPaper extends StatelessWidget {
     super.key,
     required this.label,
     required this.showPrice,
+    this.codeMode = 'auto',
     this.width = 320,
   });
 
   final ProductLabelData label;
   final bool showPrice;
+  final String codeMode;
   final double width;
+
+  String get printedCode => label.codeFor(codeMode);
 
   @override
   Widget build(BuildContext context) => Container(
-    width: width,
-    height: width * 0.75,
-    color: Colors.white,
-    padding: EdgeInsets.all(width * 0.035),
-    child: DefaultTextStyle(
-      style: TextStyle(
-        color: Colors.black,
-        fontSize: width * 0.037,
-        height: 1.05,
-      ),
-      child: Column(
-        children: [
-          Text(
-            'MINH CẢNH MOBILE',
-            maxLines: 1,
-            style: TextStyle(
-              fontSize: width * 0.048,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          SizedBox(height: width * 0.012),
-          Text(
-            label.productName,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: width * 0.052,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          if (label.detail.isNotEmpty)
-            Text(label.detail, maxLines: 1, overflow: TextOverflow.ellipsis),
-          SizedBox(height: width * 0.012),
-          Expanded(
-            child: BarcodeWidget(
-              barcode: Barcode.code128(),
-              data: label.code,
-              drawText: false,
-              color: Colors.black,
-              backgroundColor: Colors.white,
-            ),
-          ),
-          SizedBox(height: width * 0.008),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  '${label.isImei ? 'IMEI' : 'Mã'}: ${label.code}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w800),
-                ),
-              ),
-              if (showPrice)
-                Text(
-                  vnd(label.price),
-                  style: TextStyle(
+        width: width,
+        height: width * 0.75,
+        color: Colors.white,
+        padding: EdgeInsets.all(width * 0.035),
+        child: DefaultTextStyle(
+          style: TextStyle(
+              color: Colors.black, fontSize: width * 0.037, height: 1.05),
+          child: Column(children: [
+            Text('MINH CẢNH MOBILE',
+                maxLines: 1,
+                style: TextStyle(
                     fontSize: width * 0.048,
-                    fontWeight: FontWeight.w900,
+                    fontWeight: FontWeight.w900)),
+            SizedBox(height: width * 0.012),
+            Text(label.productName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: width * 0.052,
+                    fontWeight: FontWeight.w900)),
+            if (label.detail.isNotEmpty)
+              Text(label.detail,
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+            SizedBox(height: width * 0.012),
+            Expanded(
+              child: printedCode.isEmpty ? const SizedBox.shrink() : BarcodeWidget(
+                barcode: Barcode.code128(),
+                data: printedCode,
+                drawText: false,
+                color: Colors.black,
+                backgroundColor: Colors.white,
+              ),
+            ),
+            SizedBox(height: width * 0.008),
+            Row(children: [
+              if (printedCode.isNotEmpty) Expanded(child: Text(
+                '${codeMode == 'sku' || !label.isImei ? 'Mã' : 'IMEI'}: $printedCode',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w800),
+              )),
+              if (showPrice)
+                Text(vnd(label.price),
+                    style: TextStyle(
+                        fontSize: width * 0.048,
+                        fontWeight: FontWeight.w900)),
+            ]),
+          ]),
+        ),
+      );
+}
+
+
+class CompactDoubleLabelPaper extends StatelessWidget {
+  const CompactDoubleLabelPaper({
+    super.key,
+    required this.label,
+    required this.showPrice,
+    required this.codeMode,
+  });
+
+  final ProductLabelData label;
+  final bool showPrice;
+  final String codeMode;
+
+  @override
+  Widget build(BuildContext context) {
+    final code = label.codeFor(codeMode);
+    return Container(
+      width: 280,
+      height: 176,
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 5),
+      child: DefaultTextStyle(
+        style: const TextStyle(color: Colors.black, fontSize: 11, height: 1),
+        child: Column(children: [
+          const Text('MINH CẢNH MOBILE',
+              maxLines: 1,
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 3),
+          Text(label.productName,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  fontSize: 20, height: 1.0,
+                  fontWeight: FontWeight.w900)),
+          if (label.detail.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(label.detail, maxLines: 1,
+                overflow: TextOverflow.ellipsis, textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 11)),
+          ],
+          const SizedBox(height: 3),
+          Expanded(child: code.isEmpty
+              ? const SizedBox.shrink()
+              : Center(child: SizedBox(
+                  width: 232,
+                  child: BarcodeWidget(
+                    barcode: Barcode.code128(),
+                    data: code,
+                    drawText: false,
+                    color: Colors.black,
+                    backgroundColor: Colors.white,
                   ),
-                ),
-            ],
-          ),
-        ],
+                ))),
+          const SizedBox(height: 3),
+          Row(children: [
+            if (code.isNotEmpty)
+              Expanded(child: Text(
+                '${codeMode == 'sku' || !label.isImei ? 'Mã' : 'IMEI'}: $code',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    fontWeight: FontWeight.w700, fontSize: 10))),
+            if (showPrice)
+              Text(vnd(label.price),
+                  style: const TextStyle(fontSize: 19,
+                      fontWeight: FontWeight.w900)),
+          ]),
+        ]),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class ProductLabelPrinter {
-  static Future<Uint8List> render(
-    BuildContext context,
-    ProductLabelData label,
-    bool showPrice,
-  ) async {
+  static Future<Uint8List> render(BuildContext context,
+      ProductLabelData label, bool showPrice, {String codeMode = 'auto'}) async {
     final controller = ScreenshotController();
     return controller.captureFromWidget(
       InheritedTheme.captureAll(
@@ -8036,7 +8109,8 @@ class ProductLabelPrinter {
           child: MediaQuery(
             data: MediaQuery.of(context)
                 .copyWith(textScaler: TextScaler.noScaling),
-            child: LabelPaper(label: label, showPrice: showPrice),
+            child: LabelPaper(label: label, showPrice: showPrice,
+                codeMode: codeMode),
           ),
         ),
       ),
@@ -8048,12 +8122,9 @@ class ProductLabelPrinter {
   static Future<List<int>> thermalBytes(Uint8List png) async {
     final decoded = img.decodeImage(png);
     if (decoded == null) throw Exception('Không thể tạo ảnh tem');
-    final printable = img.copyResize(
-      decoded,
-      width: 320,
-      height: 240,
-      interpolation: img.Interpolation.average,
-    );
+    final printable = img.copyResize(decoded,
+        width: 320, height: 240,
+        interpolation: img.Interpolation.average);
     final profile = await CapabilityProfile.load();
     final generator = Generator(PaperSize.mm58, profile);
     return <int>[
@@ -8063,13 +8134,11 @@ class ProductLabelPrinter {
     ];
   }
 
-  static Future<void> print(
-    BuildContext context,
-    List<ProductLabelData> labels,
-    bool showPrice,
-  ) async {
+  static Future<void> print(BuildContext context,
+      List<ProductLabelData> labels, bool showPrice,
+      {String codeMode = 'auto'}) async {
     if (kIsWeb) {
-      await share(context, labels, showPrice);
+      await share(context, labels, showPrice, codeMode: codeMode);
       return;
     }
     final mac =
@@ -8082,51 +8151,110 @@ class ProductLabelPrinter {
     }
     var connected = await PrintBluetoothThermal.connectionStatus;
     if (!connected) {
-      connected = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+      connected = await PrintBluetoothThermal.connect(
+          macPrinterAddress: mac);
     }
     if (!connected) throw Exception('Không kết nối được máy in tem');
     for (final label in labels) {
-      final png = await render(context, label, showPrice);
+      final png = await render(context, label, showPrice,
+          codeMode: codeMode);
       final ok = await PrintBluetoothThermal.writeBytes(
-        await thermalBytes(png),
-      );
+          await thermalBytes(png));
       if (!ok) throw Exception('Máy in không nhận dữ liệu tem');
     }
   }
 
-  static Future<void> share(
-    BuildContext context,
-    List<ProductLabelData> labels,
-    bool showPrice,
-  ) async {
+
+  static Future<Uint8List> renderDouble(BuildContext context,
+      ProductLabelData label, bool showPrice, String codeMode) async {
+    return ScreenshotController().captureFromWidget(
+      InheritedTheme.captureAll(
+        context,
+        Material(
+          color: Colors.white,
+          child: MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.noScaling),
+            child: CompactDoubleLabelPaper(
+              label: label, showPrice: showPrice, codeMode: codeMode),
+          ),
+        ),
+      ),
+      delay: const Duration(milliseconds: 60),
+      pixelRatio: 1,
+    );
+  }
+
+  static Future<void> printDoubleLan(
+      BuildContext context,
+      List<ProductLabelData> labels,
+      bool showPrice,
+      String codeMode,
+      int copies) async {
+    final ip = await StoreDb.instance.getSetting('printer_lan_ip') ?? '';
+    final port = int.tryParse(
+        await StoreDb.instance.getSetting('printer_lan_port') ?? '9100');
+    if (ip.trim().isEmpty || port == null || port <= 0 || port > 65535) {
+      throw Exception('Chưa cài IP/cổng K80. Vào Cài đặt máy in K80 '
+          'để nhập IP LAN và cổng 9100');
+    }
+    // Every physical row contains exactly two separate 35x22 mm labels.
+    final queue = <ProductLabelData>[];
+    for (final label in labels) {
+      for (var i = 0; i < copies; i++) {
+        queue.add(label);
+      }
+    }
+    if (queue.isEmpty) return;
+    final offset = int.tryParse(
+        await StoreDb.instance.getSetting('label_double_offset') ?? '0') ?? 0;
+    final rowGap = int.tryParse(
+        await StoreDb.instance.getSetting('label_double_row_gap') ?? '2') ?? 2;
+
+    if (kIsWeb) {
+      throw UnsupportedError('In tem LAN trực tiếp chỉ hỗ trợ trên điện thoại. '
+          'Trên máy tính có thể xuất PDF khi hỗ trợ.');
+    }
+    final output = BytesBuilder(copy: false);
+    for (var i = 0; i < queue.length; i += 2) {
+        final left = await renderDouble(
+            context, queue[i], showPrice, codeMode);
+        final right = i + 1 < queue.length
+            ? await renderDouble(context, queue[i + 1], showPrice, codeMode)
+            : null;
+        output.add(TsplPrinter.encodeDoubleLabelRow(left, right,
+            horizontalOffsetDots: offset.clamp(-16, 16),
+            rowGapMm: rowGap.clamp(0, 6)));
+    }
+    await sendToPrinter(ip.trim(), port, output.takeBytes(), 1);
+  }
+
+  static Future<void> share(BuildContext context,
+      List<ProductLabelData> labels, bool showPrice,
+      {String codeMode = 'auto'}) async {
     final document = pw.Document();
     for (final label in labels) {
-      final png = await render(context, label, showPrice);
-      document.addPage(
-        pw.Page(
-          pageFormat: PdfPageFormat(
-            40 * PdfPageFormat.mm,
-            30 * PdfPageFormat.mm,
-            marginAll: 0,
-          ),
-          build: (_) => pw.Image(pw.MemoryImage(png), fit: pw.BoxFit.fill),
-        ),
-      );
+      final png = await render(context, label, showPrice,
+          codeMode: codeMode);
+      document.addPage(pw.Page(
+        pageFormat: PdfPageFormat(40 * PdfPageFormat.mm,
+            30 * PdfPageFormat.mm, marginAll: 0),
+        build: (_) => pw.Image(pw.MemoryImage(png), fit: pw.BoxFit.fill),
+      ));
     }
     final bytes = await document.save();
     if (kIsWeb) {
       await offerBrowserPdf(context, bytes, 'Tem_40x30_Minh_Canh_Mobile.pdf');
       return;
     }
-    await SharePlus.instance.share(
-      ShareParams(
-        files: [XFile.fromData(bytes, mimeType: 'application/pdf')],
-        fileNameOverrides: const ['Tem_40x30_Minh_Canh_Mobile.pdf'],
-        subject: 'Tem hàng hóa 40×30 Minh Cảnh Mobile',
-      ),
-    );
+    await SharePlus.instance.share(ShareParams(
+      files: [XFile.fromData(bytes, mimeType: 'application/pdf')],
+      fileNameOverrides: const ['Tem_40x30_Minh_Canh_Mobile.pdf'],
+      subject: 'Tem hàng hóa 40×30 Minh Cảnh Mobile',
+    ));
   }
 }
+
 
 class LabelPreviewPage extends StatefulWidget {
   const LabelPreviewPage({super.key, required this.labels});
@@ -8139,6 +8267,9 @@ class LabelPreviewPage extends StatefulWidget {
 class _LabelPreviewPageState extends State<LabelPreviewPage> {
   bool showPrice = true;
   bool busy = false;
+  String codeMode = 'auto';
+  String paperMode = 'lan_double';
+  int copies = 1;
   int index = 0;
 
   @override
@@ -8148,96 +8279,238 @@ class _LabelPreviewPageState extends State<LabelPreviewPage> {
   }
 
   Future<void> loadPreference() async {
-    final saved = await StoreDb.instance.getSetting('label_show_price');
-    if (mounted && saved != null) {
-      setState(() => showPrice = saved != '0');
-    }
+    final savedPrice = await StoreDb.instance.getSetting('label_show_price');
+    final savedCode = await StoreDb.instance.getSetting('label_code_mode');
+    final savedPaper = await StoreDb.instance.getSetting('label_paper_mode');
+    final savedCopies = await StoreDb.instance.getSetting('label_copies');
+    if (!mounted) return;
+    setState(() {
+      showPrice = savedPrice != '0';
+      if (['auto', 'sku', 'imei', 'none'].contains(savedCode)) {
+        codeMode = savedCode!;
+      }
+      if (['lan_double', 'bluetooth_single'].contains(savedPaper)) {
+        paperMode = savedPaper!;
+      }
+      final parsedCopies = int.tryParse(savedCopies ?? '');
+      if ([1, 2, 3, 5, 10].contains(parsedCopies)) {
+        copies = parsedCopies!;
+      }
+    });
+  }
+
+  Future<void> savePreference() async {
+    await StoreDb.instance.setSetting(
+        'label_show_price', showPrice ? '1' : '0');
+    await StoreDb.instance.setSetting('label_code_mode', codeMode);
+    await StoreDb.instance.setSetting('label_paper_mode', paperMode);
+    await StoreDb.instance.setSetting('label_copies', '$copies');
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Xem trước tem 40×30')),
-    body: ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Card(
-          child: SwitchListTile(
-            title: const Text('Hiện giá bán trên tem'),
-            subtitle: Text(
-              showPrice
-                  ? 'Tem sẽ in giá bán'
-                  : 'Tem chỉ in tên hàng và mã vạch/IMEI',
-            ),
-            value: showPrice,
-            onChanged: (value) async {
-              setState(() => showPrice = value);
-              await StoreDb.instance.setSetting(
-                'label_show_price',
-                value ? '1' : '0',
-              );
+  Widget build(BuildContext context) {
+    final onlySerials = widget.labels.every((label) => label.isImei);
+    // The list may include different IMEIs; never substitute a common
+    // product code for individual IMEIs unless the operator chooses it.
+    final items = <DropdownMenuItem<String>>[
+      const DropdownMenuItem(
+          value: 'auto', child: Text('Tự động: IMEI máy / Mã phụ kiện')),
+      const DropdownMenuItem(
+          value: 'sku', child: Text('Mã sản phẩm')),
+      if (onlySerials)
+        const DropdownMenuItem(value: 'imei', child: Text('IMEI máy')),
+      const DropdownMenuItem(
+          value: 'none', child: Text('Không in mã / mã vạch')),
+    ];
+    final selectedMode = codeMode == 'imei' && !onlySerials
+        ? 'auto' : codeMode;
+    final printQueue = <ProductLabelData>[
+      for (final label in widget.labels)
+        for (var i = 0; i < copies; i++) label,
+    ];
+    final isDouble = paperMode == 'lan_double';
+    final pages = isDouble
+        ? (printQueue.length + 1) ~/ 2
+        : printQueue.length;
+    final currentPage = pages > 0 ? index.clamp(0, pages - 1) : 0;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Chọn nội dung và in tem')),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        Card(child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Mẫu giấy và máy in',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: paperMode,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Chọn mẫu in'),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'lan_double',
+                    child: Text('Tem đôi 35×22 mm - K80 qua LAN')),
+                  DropdownMenuItem(
+                    value: 'bluetooth_single',
+                    child: Text('Tem đơn 40×30 mm - Bluetooth')),
+                ],
+                onChanged: busy ? null : (value) {
+                  setState(() { paperMode = value ?? 'lan_double'; index = 0; });
+                },
+              ),
+              const SizedBox(height: 12),
+              const Text('In giá bán trên tem',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              SizedBox(width: double.infinity, child:
+                SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(value: true, label: Text('Có giá')),
+                    ButtonSegment(value: false, label: Text('Không giá')),
+                  ],
+                  selected: {showPrice},
+                  onSelectionChanged: busy ? null : (values) {
+                    setState(() => showPrice = values.first);
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                key: ValueKey('code-$selectedMode-$onlySerials'),
+                initialValue: selectedMode,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Thông tin mã in trên tem'),
+                items: items,
+                onChanged: busy ? null : (value) {
+                  setState(() => codeMode = value ?? 'auto');
+                },
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<int>(
+                initialValue: copies,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Số tem mỗi mặt hàng / IMEI'),
+                items: const [1, 2, 3, 5, 10].map((count) =>
+                    DropdownMenuItem<int>(
+                      value: count,
+                      child: Text('$count tem'),
+                    )).toList(),
+                onChanged: busy ? null : (value) {
+                  setState(() { copies = value ?? 1; index = 0; });
+                },
+              ),
+            ],
+          ),
+        )),
+        const SizedBox(height: 14),
+        Text('Xem trước • ${printQueue.length} tem'
+            '${isDouble ? ' / $pages hàng tem đôi' : ''}',
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 230,
+          child: PageView.builder(
+            key: ValueKey('$paperMode-$copies'),
+            itemCount: pages,
+            onPageChanged: (value) => setState(() => index = value),
+            itemBuilder: (context, itemIndex) {
+              if (isDouble) {
+                final left = printQueue[itemIndex * 2];
+                final right = itemIndex * 2 + 1 < printQueue.length
+                    ? printQueue[itemIndex * 2 + 1] : null;
+                return Center(child: FittedBox(
+                  fit: BoxFit.contain,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(color: Colors.black26),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      CompactDoubleLabelPaper(
+                          label: left, showPrice: showPrice,
+                          codeMode: selectedMode),
+                      const SizedBox(width: 8),
+                      right == null
+                          ? const SizedBox(width: 280, height: 176)
+                          : CompactDoubleLabelPaper(
+                              label: right, showPrice: showPrice,
+                              codeMode: selectedMode),
+                    ]),
+                  ),
+                ));
+              }
+              return Center(child: FittedBox(
+                fit: BoxFit.contain,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.black26),
+                  ),
+                  child: LabelPaper(
+                    label: printQueue[itemIndex],
+                    showPrice: showPrice,
+                    codeMode: selectedMode,
+                  ),
+                ),
+              ));
             },
           ),
         ),
-        const SizedBox(height: 14),
-        SizedBox(
-          height: 255,
-          child: PageView.builder(
-            itemCount: widget.labels.length,
-            onPageChanged: (value) => setState(() => index = value),
-            itemBuilder: (context, itemIndex) => Center(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.black26),
-                  boxShadow: const [
-                    BoxShadow(color: Colors.black12, blurRadius: 8),
-                  ],
-                ),
-                child: LabelPaper(
-                  label: widget.labels[itemIndex],
-                  showPrice: showPrice,
-                ),
-              ),
-            ),
+        Text('Trang ${currentPage + 1}/$pages'
+            '${isDouble ? ' • Khe ngang 1 mm; tem lẻ sẽ để trống bên phải' : ''}',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black54)),
+        const SizedBox(height: 12),
+        if (isDouble)
+          const Card(child: Padding(
+            padding: EdgeInsets.all(12),
+            child: Text(
+                'Máy in K80 dùng IP/cổng ở mục Cài đặt máy in K80. '
+                'Sau khi thử, nếu giấy lệch hàng cần căn lại khe dọc cuộn tem.'),
+          )),
+        if (!isDouble) ...[
+          OutlinedButton.icon(
+            onPressed: busy ? null : share,
+            icon: const Icon(Icons.picture_as_pdf_outlined),
+            label: const Text('Chia sẻ PDF tem 40×30'),
           ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Tem ${index + 1}/${widget.labels.length} • Khổ 40×30 mm',
-          textAlign: TextAlign.center,
-          style: const TextStyle(color: Colors.black54),
-        ),
-        const SizedBox(height: 18),
-        OutlinedButton.icon(
-          onPressed: busy ? null : share,
-          icon: const Icon(Icons.picture_as_pdf_outlined),
-          label: const Text('Chia sẻ PDF tem 40×30'),
-        ),
-        const SizedBox(height: 10),
+          const SizedBox(height: 10),
+        ],
         FilledButton.icon(
           onPressed: busy ? null : printLabels,
           icon: busy
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
+              ? const SizedBox(width: 18, height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2))
               : const Icon(Icons.print),
-          label: Text(
-            busy ? 'Đang in' : 'In ${widget.labels.length} tem qua Bluetooth',
-          ),
+          label: Text(busy ? 'Đang in' :
+              'In ${printQueue.length} tem qua ${isDouble ? 'LAN K80' : 'Bluetooth'}'),
         ),
-      ],
-    ),
-  );
+      ]),
+    );
+  }
 
   Future<void> printLabels() async {
     setState(() => busy = true);
     try {
-      await ProductLabelPrinter.print(context, widget.labels, showPrice);
+      await savePreference();
+      final effectiveMode = codeMode == 'imei' &&
+          !widget.labels.every((label) => label.isImei)
+          ? 'auto' : codeMode;
+      if (paperMode == 'lan_double') {
+        await ProductLabelPrinter.printDoubleLan(
+            context, widget.labels, showPrice, effectiveMode, copies);
+      } else {
+        final queue = <ProductLabelData>[
+          for (final label in widget.labels)
+            for (var i = 0; i < copies; i++) label,
+        ];
+        await ProductLabelPrinter.print(
+            context, queue, showPrice, codeMode: effectiveMode);
+      }
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Đã gửi tem tới máy in')));
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Đã gửi tem tới máy in')));
       }
     } catch (error) {
       if (mounted) showError(context, error);
@@ -8248,7 +8521,8 @@ class _LabelPreviewPageState extends State<LabelPreviewPage> {
   Future<void> share() async {
     setState(() => busy = true);
     try {
-      await ProductLabelPrinter.share(context, widget.labels, showPrice);
+      await ProductLabelPrinter.share(
+          context, widget.labels, showPrice, codeMode: codeMode);
     } catch (error) {
       if (mounted) showError(context, error);
     }
