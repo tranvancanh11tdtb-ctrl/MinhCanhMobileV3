@@ -23,4 +23,30 @@ void main() {
     expect(bytes.length - bitmapStart - bitmapCommand.length - ending.length,
         72 * 16);
   });
+
+  test('paired 35x22 mm TSPL rows contain both label bitmaps', () {
+    final left = img.Image(width: 280, height: 176);
+    final right = img.Image(width: 280, height: 176);
+    img.fill(left, color: img.ColorRgb8(255, 255, 255));
+    img.fill(right, color: img.ColorRgb8(255, 255, 255));
+    left.setPixelRgb(4, 4, 0, 0, 0);
+    right.setPixelRgb(4, 4, 0, 0, 0);
+    final raw = TsplPrinter.encodeDoubleLabelRow(
+      Uint8List.fromList(img.encodePng(left)),
+      Uint8List.fromList(img.encodePng(right)),
+    );
+    final asText = latin1.decode(raw);
+    const marker = 'BITMAP 0,0,72,176,0,';
+    final start = asText.indexOf(marker);
+    const ending = '\r\nPRINT 1,1\r\n';
+    expect(start, greaterThanOrEqualTo(0));
+    expect(asText, contains('SIZE 72 mm,22 mm\r\n'));
+    expect(asText, contains('GAP 2 mm,0 mm\r\n'));
+    expect(asText, contains('DIRECTION 0\r\n'));
+    expect(raw.length - (start + marker.length) - ending.length,
+        72 * 176);
+    final rasterStart = start + marker.length;
+    expect(raw[rasterStart + 4 * 72], isNot(0)); // left, x=4
+    expect(raw[rasterStart + 4 * 72 + 36], isNot(0)); // right, x=292
+  });
 }
