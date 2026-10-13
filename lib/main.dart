@@ -2701,6 +2701,7 @@ class _ProductDetailState extends State<ProductDetail> {
               .where((value) => value.isNotEmpty)
               .join(' • '),
           code: '${product['code']}',
+          productCode: '${product['code']}',
           price: (product['sale_price'] as num).toInt(),
           isImei: false,
         ),
@@ -7678,13 +7679,24 @@ class ProductLabelData {
     required this.code,
     required this.price,
     required this.isImei,
+    this.productCode = '',
   });
 
   final String productName;
   final String detail;
   final String code;
+  final String productCode;
   final int price;
   final bool isImei;
+
+  String codeFor(String mode) {
+    if (mode == 'none') return '';
+    if (mode == 'sku') {
+      if (productCode.trim().isNotEmpty) return productCode.trim();
+      return isImei ? '' : code.trim();
+    }
+    return code.trim();
+  }
 }
 
 ProductLabelData labelForSerial(
@@ -7699,6 +7711,7 @@ ProductLabelData labelForSerial(
     productName: '${product['name']}',
     detail: details,
     code: '${serial['imei']}',
+    productCode: '${product['code'] ?? ''}',
     price: (product['sale_price'] as num).toInt(),
     isImei: true,
   );
@@ -7709,12 +7722,16 @@ class LabelPaper extends StatelessWidget {
     super.key,
     required this.label,
     required this.showPrice,
+    this.codeMode = 'auto',
     this.width = 320,
   });
 
   final ProductLabelData label;
   final bool showPrice;
+  final String codeMode;
   final double width;
+
+  String get printedCode => label.codeFor(codeMode);
 
   @override
   Widget build(BuildContext context) => Container(
@@ -7743,9 +7760,9 @@ class LabelPaper extends StatelessWidget {
                   maxLines: 1, overflow: TextOverflow.ellipsis),
             SizedBox(height: width * 0.012),
             Expanded(
-              child: BarcodeWidget(
+              child: printedCode.isEmpty ? const SizedBox.shrink() : BarcodeWidget(
                 barcode: Barcode.code128(),
-                data: label.code,
+                data: printedCode,
                 drawText: false,
                 color: Colors.black,
                 backgroundColor: Colors.white,
@@ -7753,8 +7770,8 @@ class LabelPaper extends StatelessWidget {
             ),
             SizedBox(height: width * 0.008),
             Row(children: [
-              Expanded(child: Text(
-                '${label.isImei ? 'IMEI' : 'Mã'}: ${label.code}',
+              if (printedCode.isNotEmpty) Expanded(child: Text(
+                '${codeMode == 'sku' || !label.isImei ? 'Mã' : 'IMEI'}: $printedCode',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontWeight: FontWeight.w800),
