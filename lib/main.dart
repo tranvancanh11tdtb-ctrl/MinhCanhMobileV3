@@ -1524,16 +1524,15 @@ class StoreDb {
 
   Future<String> exportBackup() async {
     final db = await database;
-    const tables = [
-      'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
-      'sale_items', 'inventory_movements', 'repairs', 'warranty_claims',
-      'cash_entries', 'stocktakes', 'customer_directory',
-      'supplier_directory', 'debt_adjustments', 'product_categories',
-      'app_settings'
-    ];
+    // Include additional tables carried over from backups made by newer app
+    // versions, so re-exporting the TEST copy does not silently omit them.
+    final tableRows = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name NOT LIKE 'sqlite_%' ORDER BY name");
+    final tables = tableRows.map((row) => row['name'] as String).toList();
     final data = <String, Object?>{
       'app': 'MinhCanhMobileV3',
-      'backup_version': 5,
+      'backup_version': 7,
       'created_at': DateTime.now().toIso8601String(),
     };
     for (final table in tables) {
@@ -1547,11 +1546,13 @@ class StoreDb {
     if (decoded is! Map || decoded['app'] != 'MinhCanhMobileV3') {
       throw Exception('Nội dung sao lưu không đúng của Minh Cảnh Mobile V3');
     }
+
     const deleteOrder = [
-      'warranty_claims', 'stocktakes', 'cash_entries', 'debt_adjustments', 'repairs',
-      'inventory_movements', 'sale_items', 'sales', 'purchase_items',
-      'serial_units', 'purchases', 'products', 'customer_directory',
-      'supplier_directory', 'product_categories', 'app_settings'
+      'warranty_claims', 'stocktakes', 'cash_entries', 'debt_adjustments',
+      'repairs', 'inventory_movements', 'sale_items', 'sales',
+      'purchase_items', 'serial_units', 'purchases', 'products',
+      'customer_directory', 'supplier_directory', 'product_categories',
+      'app_settings'
     ];
     const insertOrder = [
       'products', 'purchases', 'serial_units', 'purchase_items', 'sales',
@@ -1560,41 +1561,40 @@ class StoreDb {
       'supplier_directory', 'debt_adjustments', 'product_categories',
       'app_settings'
     ];
-    // Inspect and validate the backup before touching the current database.
-    final knownTables = insertOrder.toSet();
-    for (final entry in decoded.entries) {
-      if (entry.value is List && !knownTables.contains(entry.key)) {
-        if ((entry.value as List).isNotEmpty) {
-          throw Exception('Bản sao lưu có bảng ${entry.key} chưa được '
-              'hỗ trợ. Hãy cập nhật app trước khi khôi phục.');
-        }
-      }
-    }
+    const reservedKeys = {'app', 'backup_version', 'created_at'};
+    final tableNamePattern = RegExp(r'^[a-zA-Z_][a-zA-Z0-9_]*$');
+    // Validate ALL data first. A newer app can export tables that the test
+    // build does not use, e.g. product_brands or recurring_expenses. Retain
+    // those tables as data, but do not imply the old UI supports their logic.
     final prepared = <String, List<Map<String, Object?>>>{};
-    final safeName = RegExp(r'^[a-zA-Z_][a-zA-Z0-9_]*$');
-    for (final table in insertOrder) {
-      final rawRows = decoded[table];
-      if (rawRows == null) {
-        prepared[table] = const [];
-        continue;
+    for (final entry in decoded.entries) {
+      final table = entry.key;
+      if (table is! String) {
+        throw Exception('Tên bảng trong bản sao lưu không hợp lệ');
       }
-      if (rawRows is! List) {
-        throw Exception('Dữ liệu bảng $table trong bản sao lưu không hợp lệ');
+      if (reservedKeys.contains(table)) continue;
+      if (!tableNamePattern.hasMatch(table) ||
+          table.toLowerCase().startsWith('sqlite_')) {
+        throw Exception('Tên bảng $table không hợp lệ');
+      }
+      final sourceRows = entry.value;
+      if (sourceRows is! List) {
+        throw Exception('Bảng $table có định dạng dữ liệu không hợp lệ');
       }
       final rows = <Map<String, Object?>>[];
-      for (final item in rawRows) {
-        if (item is! Map) {
-          throw Exception('Có bản ghi không hợp lệ ở bảng $table');
+      for (final sourceRow in sourceRows) {
+        if (sourceRow is! Map) {
+          throw Exception('Bảng $table chứa bản ghi không hợp lệ');
         }
         final row = <String, Object?>{};
-        for (final entry in item.entries) {
-          final key = entry.key;
-          if (key is! String || !safeName.hasMatch(key)) {
-            throw Exception('Tên cột không hợp lệ trong bảng $table');
+        for (final cell in sourceRow.entries) {
+          final key = cell.key;
+          if (key is! String || !tableNamePattern.hasMatch(key)) {
+            throw Exception('Bảng $table có tên cột không hợp lệ');
           }
-          final value = entry.value;
-          if (value != null && value is! num && value is! String) {
-            throw Exception('Kiểu dữ liệu $key không hợp lệ trong bảng $table');
+          final value = cell.value;
+          if (value != null && value is! String && value is! num) {
+            throw Exception('Bảng $table có giá trị không hợp lệ ở cột $key');
           }
           row[key] = value;
         }
@@ -1602,12 +1602,40 @@ class StoreDb {
       }
       prepared[table] = rows;
     }
+    for (final table in insertOrder) {
+      prepared.putIfAbsent(table, () => []);
+    }
+
     final db = await database;
     await db.execute('PRAGMA foreign_keys = OFF');
     try {
       await db.transaction((txn) async {
-        // Add missing columns, preserving extra fields from newer backups.
-        for (final table in insertOrder) {
+        final extraTables = prepared.keys
+            .where((table) => !insertOrder.contains(table))
+            .toList()..sort();
+        final currentTables = (await txn.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type='table' "
+          "AND name NOT LIKE 'sqlite_%'"))
+            .map((row) => row['name'] as String)
+            .toSet();
+
+        // Create storage for every newer-version table, including an empty
+        // table. Unknown columns have no SQLite affinity, which preserves
+        // the original integer/string values in snapshot records.
+        for (final table in extraTables) {
+          if (!currentTables.contains(table)) {
+            final names = <String>{
+              for (final row in prepared[table]!) ...row.keys,
+            }.toList()..sort();
+            if (names.isEmpty) names.add('__empty_snapshot_table');
+            final sqlColumns = names.map((name) => '"$name"').join(', ');
+            await txn.execute('CREATE TABLE "$table" ($sqlColumns)');
+          }
+        }
+
+        // Expand known and previously carried-over tables to accommodate
+        // fields introduced by newer releases.
+        for (final table in prepared.keys) {
           final columns = (await txn.rawQuery('PRAGMA table_info("$table")'))
               .map((column) => column['name'] as String)
               .toSet();
@@ -1620,22 +1648,31 @@ class StoreDb {
             }
           }
         }
+
+        // Everything from this point runs in a transaction. Any failure
+        // rolls back BOTH deletions and table-structure changes.
+        for (final table in extraTables) {
+          await txn.delete(table);
+        }
         for (final table in deleteOrder) {
           await txn.delete(table);
         }
-        for (final table in insertOrder) {
+        for (final table in [...insertOrder, ...extraTables]) {
           for (final row in prepared[table]!) {
             await txn.insert(table, row,
-                conflictAlgorithm: ConflictAlgorithm.replace);
+                conflictAlgorithm: ConflictAlgorithm.abort);
           }
         }
+        // Existing UI uses some derived customer/category directories.
         await _backfillDirectories(txn);
         await _createV6Tables(txn);
-        final brokenReferences = await txn.rawQuery('PRAGMA foreign_key_check');
-        if (brokenReferences.isNotEmpty) {
-          throw Exception('Bản sao lưu có tham chiếu dữ liệu chưa hợp lệ. '
-              'Dữ liệu hiện tại được giữ nguyên.');
+        final invalidReferences = await txn.rawQuery('PRAGMA foreign_key_check');
+        if (invalidReferences.isNotEmpty) {
+          throw Exception('Bản sao lưu có liên kết dữ liệu chưa hợp lệ. '
+              'Đã hủy thay đổi và giữ dữ liệu cũ.');
         }
+        // An extra table imported from newer builds is only preserved for
+        // round-trip backups. The TEST application's older UI cannot edit it.
       });
     } finally {
       await db.execute('PRAGMA foreign_keys = ON');
