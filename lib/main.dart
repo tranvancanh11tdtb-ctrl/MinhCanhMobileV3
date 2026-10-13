@@ -7985,10 +7985,12 @@ class ProductLabelPrinter {
   }
 
   static Future<void> share(BuildContext context,
-      List<ProductLabelData> labels, bool showPrice) async {
+      List<ProductLabelData> labels, bool showPrice,
+      {String codeMode = 'auto'}) async {
     final document = pw.Document();
     for (final label in labels) {
-      final png = await render(context, label, showPrice);
+      final png = await render(context, label, showPrice,
+          codeMode: codeMode);
       document.addPage(pw.Page(
         pageFormat: PdfPageFormat(40 * PdfPageFormat.mm,
             30 * PdfPageFormat.mm, marginAll: 0),
@@ -8267,7 +8269,7 @@ class _LabelPreviewPageState extends State<LabelPreviewPage> {
     setState(() => busy = true);
     try {
       await ProductLabelPrinter.share(
-          context, widget.labels, showPrice);
+          context, widget.labels, showPrice, codeMode: codeMode);
     } catch (error) {
       if (mounted) showError(context, error);
     }
