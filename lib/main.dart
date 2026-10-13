@@ -14,6 +14,7 @@ import 'platform/socket_stub.dart'
 import 'dart:typed_data';
 
 import 'package:cross_file/cross_file.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:barcode_widget/barcode_widget.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart' hide Barcode;
 import 'package:flutter/material.dart';
@@ -34,6 +35,7 @@ import 'vietqr.dart';
 import 'features/device_unlock.dart';
 
 part 'features/upgrade_ui.dart';
+part 'features/backup_file.dart';
 part 'features/purchase_ui.dart';
 part 'features/customer_picker.dart';
 part 'features/finance_ui.dart';
@@ -7783,9 +7785,15 @@ class _BackupPageState extends State<BackupPage> {
                 const Text(
                   kIsWeb
                       ? 'Tải bản sao lưu JSON về máy tính. Cất giữ tệp này để khôi phục kho, hóa đơn, công nợ và lịch sử khi cần.'
-                      : 'Ứng dụng sẽ sao chép toàn bộ kho, hóa đơn, bảo hành, sửa chữa và sổ quỹ vào bộ nhớ tạm. Hãy dán nội dung đó vào Ghi chú hoặc một tệp riêng để cất giữ.',
+                      : 'Ưu tiên lưu tệp JSON để tránh bị cắt dữ liệu trên điện thoại. Tệp chứa cả khách hàng và thông tin bảo mật, hãy cất ở nơi riêng tư.',
                 ),
                 const SizedBox(height: 14),
+                FilledButton.icon(
+                  onPressed: busy ? null : saveBackupFile,
+                  icon: const Icon(Icons.save_alt),
+                  label: const Text('Lưu file sao lưu JSON'),
+                ),
+                const SizedBox(height: 8),
                 FilledButton.icon(
                   onPressed: busy ? null : backup,
                   icon: const Icon(Icons.copy_all),
@@ -7810,9 +7818,15 @@ class _BackupPageState extends State<BackupPage> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Dán nguyên nội dung bản sao lưu đã lưu trước đó vào ô bên dưới.',
+                  'Ưu tiên chọn tệp .json để không bị cắt nội dung. Chỉ dán văn bản nếu bản sao lưu ngắn.',
                 ),
                 const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: busy ? null : restoreBackupFile,
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('Chọn tệp JSON và khôi phục'),
+                ),
+                const SizedBox(height: 14),
                 TextField(
                   controller: restoreText,
                   minLines: 5,
