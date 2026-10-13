@@ -53,7 +53,13 @@ class TsplPrinter {
       'CLS\r\n'
       'BITMAP 0,0,$_bytesPerRow,$height,0,',
     ));
-    output.add(bitmap);
+    // TSPL BITMAP bit polarity: 0 burns a black dot, 1 leaves paper white.
+    // Our rasterization uses 1 for dark pixels, so invert the bytes.
+    // Without this the printer produces white letters on a black background.
+    final printerBitmap = Uint8List.fromList(
+      bitmap.map((value) => value ^ 0xff).toList(),
+    );
+    output.add(printerBitmap);
     output.add(ascii.encode('\r\nPRINT 1,1\r\n'));
     return output.takeBytes();
   }
@@ -111,7 +117,13 @@ class TsplPrinter {
       'CLS\r\n'
       'BITMAP 0,0,$_bytesPerRow,$rowHeight,0,',
     ));
-    output.add(bitmap);
+    // TSPL BITMAP bit polarity: 0 burns a black dot, 1 leaves paper white.
+    // Our rasterization uses 1 for dark pixels, so invert the bytes.
+    // Without this the printer produces white letters on a black background.
+    final printerBitmap = Uint8List.fromList(
+      bitmap.map((value) => value ^ 0xff).toList(),
+    );
+    output.add(printerBitmap);
     output.add(ascii.encode('\r\nPRINT 1,1\r\n'));
     return output.takeBytes();
   }
