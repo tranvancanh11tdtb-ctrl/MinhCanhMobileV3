@@ -7787,9 +7787,77 @@ class LabelPaper extends StatelessWidget {
       );
 }
 
+
+class CompactDoubleLabelPaper extends StatelessWidget {
+  const CompactDoubleLabelPaper({
+    super.key,
+    required this.label,
+    required this.showPrice,
+    required this.codeMode,
+  });
+
+  final ProductLabelData label;
+  final bool showPrice;
+  final String codeMode;
+
+  @override
+  Widget build(BuildContext context) {
+    final printedCode = label.codeFor(codeMode);
+    return Container(
+      width: 280,
+      height: 176,
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(6, 7, 6, 5),
+      child: DefaultTextStyle(
+        style: const TextStyle(color: Colors.black, fontSize: 12, height: 1.05),
+        child: Column(children: [
+          const Text('MINH CẢNH MOBILE',
+              maxLines: 1,
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 5),
+          Text(label.productName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 16,
+                  fontWeight: FontWeight.w900)),
+          if (label.detail.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(label.detail,
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+          ],
+          const SizedBox(height: 5),
+          Expanded(child: printedCode.isEmpty
+              ? const SizedBox.shrink()
+              : BarcodeWidget(
+                  barcode: Barcode.code128(),
+                  data: printedCode,
+                  drawText: false,
+                  color: Colors.black,
+                  backgroundColor: Colors.white,
+                )),
+          const SizedBox(height: 4),
+          Row(children: [
+            if (printedCode.isNotEmpty)
+              Expanded(child: Text(
+                '${codeMode == 'sku' || !label.isImei ? 'Mã' : 'IMEI'}: $printedCode',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.bold,
+                    fontSize: 11))),
+            if (showPrice)
+              Text(vnd(label.price),
+                  style: const TextStyle(fontSize: 14,
+                      fontWeight: FontWeight.w900)),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
+
 class ProductLabelPrinter {
   static Future<Uint8List> render(BuildContext context,
-      ProductLabelData label, bool showPrice) async {
+      ProductLabelData label, bool showPrice, {String codeMode = 'auto'}) async {
     final controller = ScreenshotController();
     return controller.captureFromWidget(
       InheritedTheme.captureAll(
@@ -7799,7 +7867,8 @@ class ProductLabelPrinter {
           child: MediaQuery(
             data: MediaQuery.of(context)
                 .copyWith(textScaler: TextScaler.noScaling),
-            child: LabelPaper(label: label, showPrice: showPrice),
+            child: LabelPaper(label: label, showPrice: showPrice,
+                codeMode: codeMode),
           ),
         ),
       ),
@@ -7824,7 +7893,8 @@ class ProductLabelPrinter {
   }
 
   static Future<void> print(BuildContext context,
-      List<ProductLabelData> labels, bool showPrice) async {
+      List<ProductLabelData> labels, bool showPrice,
+      {String codeMode = 'auto'}) async {
     final mac =
         await StoreDb.instance.getSetting('label_printer_bluetooth_mac') ?? '';
     if (mac.isEmpty) {
@@ -7840,10 +7910,77 @@ class ProductLabelPrinter {
     }
     if (!connected) throw Exception('Không kết nối được máy in tem');
     for (final label in labels) {
-      final png = await render(context, label, showPrice);
+      final png = await render(context, label, showPrice,
+          codeMode: codeMode);
       final ok = await PrintBluetoothThermal.writeBytes(
           await thermalBytes(png));
       if (!ok) throw Exception('Máy in không nhận dữ liệu tem');
+    }
+  }
+
+
+  static Future<Uint8List> renderDouble(BuildContext context,
+      ProductLabelData label, bool showPrice, String codeMode) async {
+    return ScreenshotController().captureFromWidget(
+      InheritedTheme.captureAll(
+        context,
+        Material(
+          color: Colors.white,
+          child: MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.noScaling),
+            child: CompactDoubleLabelPaper(
+              label: label, showPrice: showPrice, codeMode: codeMode),
+          ),
+        ),
+      ),
+      delay: const Duration(milliseconds: 60),
+      pixelRatio: 1,
+    );
+  }
+
+  static Future<void> printDoubleLan(
+      BuildContext context,
+      List<ProductLabelData> labels,
+      bool showPrice,
+      String codeMode,
+      int copies) async {
+    final ip = await StoreDb.instance.getSetting('printer_lan_ip') ?? '';
+    final port = int.tryParse(
+        await StoreDb.instance.getSetting('printer_lan_port') ?? '9100');
+    if (ip.trim().isEmpty || port == null || port <= 0 || port > 65535) {
+      throw Exception('Chưa cài IP/cổng K80. Vào Cài đặt máy in K80 '
+          'để nhập IP LAN và cổng 9100');
+    }
+    // Every physical row contains exactly two separate 35x22 mm labels.
+    final queue = <ProductLabelData>[];
+    for (final label in labels) {
+      for (var i = 0; i < copies; i++) {
+        queue.add(label);
+      }
+    }
+    if (queue.isEmpty) return;
+    final offset = int.tryParse(
+        await StoreDb.instance.getSetting('label_double_offset') ?? '0') ?? 0;
+    final rowGap = int.tryParse(
+        await StoreDb.instance.getSetting('label_double_row_gap') ?? '2') ?? 2;
+
+    final socket = await Socket.connect(ip.trim(), port,
+        timeout: const Duration(seconds: 7));
+    try {
+      for (var i = 0; i < queue.length; i += 2) {
+        final left = await renderDouble(
+            context, queue[i], showPrice, codeMode);
+        final right = i + 1 < queue.length
+            ? await renderDouble(context, queue[i + 1], showPrice, codeMode)
+            : null;
+        socket.add(TsplPrinter.encodeDoubleLabelRow(left, right,
+            horizontalOffsetDots: offset.clamp(-16, 16),
+            rowGapMm: rowGap.clamp(0, 6)));
+        await socket.flush();
+      }
+    } finally {
+      await socket.close();
     }
   }
 
