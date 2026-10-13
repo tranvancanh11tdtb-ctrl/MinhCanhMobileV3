@@ -18,6 +18,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'scanner_page.dart';
+import 'tspl_printer.dart';
 import 'vietqr.dart';
 
 void main() async {
@@ -8410,7 +8411,10 @@ class ReceiptPrinter {
         await StoreDb.instance.getSetting('printer_copies') ?? '1');
     final copies = (savedCopies ?? 1).clamp(1, 3);
     final png = await render(context, receipt);
-    final bytes = await thermalBytes(png);
+    final lanLanguage = await StoreDb.instance.getSetting('printer_lan_language') ?? 'tspl';
+    final bytes = transport == 'lan' && lanLanguage == 'tspl'
+        ? TsplPrinter.encodeRaster(png)
+        : await thermalBytes(png);
 
     if (transport == 'bluetooth') {
       final mac =
@@ -8556,6 +8560,7 @@ class PrinterSettingsPage extends StatefulWidget {
 
 class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
   String transport = 'lan';
+  String lanLanguage = 'tspl';
   String bluetoothMac = '';
   String bluetoothName = '';
   int copies = 1;
@@ -8582,6 +8587,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
   Future<void> load() async {
     transport =
         await StoreDb.instance.getSetting('printer_transport') ?? 'lan';
+    lanLanguage = await StoreDb.instance.getSetting('printer_lan_language') ?? 'tspl';
     ip.text = await StoreDb.instance.getSetting('printer_lan_ip') ?? '';
     port.text =
         await StoreDb.instance.getSetting('printer_lan_port') ?? '9100';
@@ -8635,6 +8641,16 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                         keyboardType: TextInputType.number,
                         decoration: const InputDecoration(
                             labelText: 'Cổng in', hintText: '9100')),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: lanLanguage,
+                      decoration: const InputDecoration(labelText: 'Ngôn ngữ máy in LAN'),
+                      items: const [
+                        DropdownMenuItem(value: 'tspl', child: Text('TSPL (máy KiotViet đã thử thành công)')),
+                        DropdownMenuItem(value: 'escpos', child: Text('ESC/POS (máy in hóa đơn thông thường)')),
+                      ],
+                      onChanged: (value) => setState(() => lanLanguage = value ?? 'tspl'),
+                    ),
                   ]))),
             ] else ...[
               Card(child: Padding(padding: const EdgeInsets.all(16),
@@ -8731,6 +8747,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
       throw Exception('Hãy chọn máy in Bluetooth');
     }
     await StoreDb.instance.setSetting('printer_transport', transport);
+    await StoreDb.instance.setSetting('printer_lan_language', lanLanguage);
     await StoreDb.instance.setSetting('printer_lan_ip', ip.text.trim());
     await StoreDb.instance.setSetting('printer_lan_port', port.text.trim());
     await StoreDb.instance
