@@ -7765,6 +7765,10 @@ class _BackupPageState extends State<BackupPage> {
   final restoreText = TextEditingController();
   bool busy = false;
 
+  void updateBackupBusy(bool value) {
+    if (mounted) setState(() => busy = value);
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Sao lưu & khôi phục')),
