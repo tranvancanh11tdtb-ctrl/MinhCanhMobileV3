@@ -8004,6 +8004,7 @@ class ProductLabelPrinter {
   }
 }
 
+
 class LabelPreviewPage extends StatefulWidget {
   const LabelPreviewPage({super.key, required this.labels});
   final List<ProductLabelData> labels;
@@ -8015,6 +8016,9 @@ class LabelPreviewPage extends StatefulWidget {
 class _LabelPreviewPageState extends State<LabelPreviewPage> {
   bool showPrice = true;
   bool busy = false;
+  String codeMode = 'auto';
+  String paperMode = 'lan_double';
+  int copies = 1;
   int index = 0;
 
   @override
@@ -8024,78 +8028,231 @@ class _LabelPreviewPageState extends State<LabelPreviewPage> {
   }
 
   Future<void> loadPreference() async {
-    final saved = await StoreDb.instance.getSetting('label_show_price');
-    if (mounted && saved != null) {
-      setState(() => showPrice = saved != '0');
-    }
+    final savedPrice = await StoreDb.instance.getSetting('label_show_price');
+    final savedCode = await StoreDb.instance.getSetting('label_code_mode');
+    final savedPaper = await StoreDb.instance.getSetting('label_paper_mode');
+    final savedCopies = await StoreDb.instance.getSetting('label_copies');
+    if (!mounted) return;
+    setState(() {
+      showPrice = savedPrice != '0';
+      if (['auto', 'sku', 'imei', 'none'].contains(savedCode)) {
+        codeMode = savedCode!;
+      }
+      if (['lan_double', 'bluetooth_single'].contains(savedPaper)) {
+        paperMode = savedPaper!;
+      }
+      final parsedCopies = int.tryParse(savedCopies ?? '');
+      if ([1, 2, 3, 5, 10].contains(parsedCopies)) {
+        copies = parsedCopies!;
+      }
+    });
+  }
+
+  Future<void> savePreference() async {
+    await StoreDb.instance.setSetting(
+        'label_show_price', showPrice ? '1' : '0');
+    await StoreDb.instance.setSetting('label_code_mode', codeMode);
+    await StoreDb.instance.setSetting('label_paper_mode', paperMode);
+    await StoreDb.instance.setSetting('label_copies', '$copies');
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Xem trước tem 40×30')),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
-          Card(child: SwitchListTile(
-            title: const Text('Hiện giá bán trên tem'),
-            subtitle: Text(showPrice
-                ? 'Tem sẽ in giá bán'
-                : 'Tem chỉ in tên hàng và mã vạch/IMEI'),
-            value: showPrice,
-            onChanged: (value) async {
-              setState(() => showPrice = value);
-              await StoreDb.instance
-                  .setSetting('label_show_price', value ? '1' : '0');
-            },
-          )),
-          const SizedBox(height: 14),
-          SizedBox(
-            height: 255,
-            child: PageView.builder(
-              itemCount: widget.labels.length,
-              onPageChanged: (value) => setState(() => index = value),
-              itemBuilder: (context, itemIndex) => Center(
+  Widget build(BuildContext context) {
+    final onlySerials = widget.labels.every((label) => label.isImei);
+    // The list may include different IMEIs; never substitute a common
+    // product code for individual IMEIs unless the operator chooses it.
+    final items = <DropdownMenuItem<String>>[
+      const DropdownMenuItem(
+          value: 'auto', child: Text('Tự động: IMEI máy / Mã phụ kiện')),
+      const DropdownMenuItem(
+          value: 'sku', child: Text('Mã sản phẩm')),
+      if (onlySerials)
+        const DropdownMenuItem(value: 'imei', child: Text('IMEI máy')),
+      const DropdownMenuItem(
+          value: 'none', child: Text('Không in mã / mã vạch')),
+    ];
+    final selectedMode = codeMode == 'imei' && !onlySerials
+        ? 'auto' : codeMode;
+    final printQueue = <ProductLabelData>[
+      for (final label in widget.labels)
+        for (var i = 0; i < copies; i++) label,
+    ];
+    final isDouble = paperMode == 'lan_double';
+    final pages = isDouble
+        ? (printQueue.length + 1) ~/ 2
+        : printQueue.length;
+    final currentPage = pages > 0 ? index.clamp(0, pages - 1) : 0;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Chọn nội dung và in tem')),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        Card(child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Mẫu giấy và máy in',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: paperMode,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Chọn mẫu in'),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'lan_double',
+                    child: Text('Tem đôi 35×22 mm - K80 qua LAN')),
+                  DropdownMenuItem(
+                    value: 'bluetooth_single',
+                    child: Text('Tem đơn 40×30 mm - Bluetooth')),
+                ],
+                onChanged: busy ? null : (value) {
+                  setState(() { paperMode = value ?? 'lan_double'; index = 0; });
+                },
+              ),
+              const SizedBox(height: 12),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('In kèm giá bán'),
+                subtitle: Text(showPrice
+                    ? 'Hiện giá bán hiện tại trên tem'
+                    : 'Không hiện giá bán trên tem'),
+                value: showPrice,
+                onChanged: busy ? null : (value) {
+                  setState(() => showPrice = value);
+                },
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                key: ValueKey('code-$selectedMode-$onlySerials'),
+                initialValue: selectedMode,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Thông tin mã in trên tem'),
+                items: items,
+                onChanged: busy ? null : (value) {
+                  setState(() => codeMode = value ?? 'auto');
+                },
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<int>(
+                initialValue: copies,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Số tem mỗi mặt hàng / IMEI'),
+                items: const [1, 2, 3, 5, 10].map((count) =>
+                    DropdownMenuItem<int>(
+                      value: count,
+                      child: Text('$count tem'),
+                    )).toList(),
+                onChanged: busy ? null : (value) {
+                  setState(() { copies = value ?? 1; index = 0; });
+                },
+              ),
+            ],
+          ),
+        )),
+        const SizedBox(height: 14),
+        Text('Xem trước • ${printQueue.length} tem'
+            '${isDouble ? ' / $pages hàng tem đôi' : ''}',
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 230,
+          child: PageView.builder(
+            key: ValueKey('$paperMode-$copies'),
+            itemCount: pages,
+            onPageChanged: (value) => setState(() => index = value),
+            itemBuilder: (context, itemIndex) {
+              if (isDouble) {
+                final left = printQueue[itemIndex * 2];
+                final right = itemIndex * 2 + 1 < printQueue.length
+                    ? printQueue[itemIndex * 2 + 1] : null;
+                return Center(child: FittedBox(
+                  fit: BoxFit.contain,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(color: Colors.black26),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      CompactDoubleLabelPaper(
+                          label: left, showPrice: showPrice,
+                          codeMode: selectedMode),
+                      const SizedBox(width: 8),
+                      right == null
+                          ? const SizedBox(width: 280, height: 176)
+                          : CompactDoubleLabelPaper(
+                              label: right, showPrice: showPrice,
+                              codeMode: selectedMode),
+                    ]),
+                  ),
+                ));
+              }
+              return Center(child: FittedBox(
+                fit: BoxFit.contain,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     border: Border.all(color: Colors.black26),
-                    boxShadow: const [
-                      BoxShadow(color: Colors.black12, blurRadius: 8),
-                    ],
                   ),
                   child: LabelPaper(
-                    label: widget.labels[itemIndex],
+                    label: printQueue[itemIndex],
                     showPrice: showPrice,
+                    codeMode: selectedMode,
                   ),
                 ),
-              ),
-            ),
+              ));
+            },
           ),
-          const SizedBox(height: 8),
-          Text('Tem ${index + 1}/${widget.labels.length} • Khổ 40×30 mm',
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.black54)),
-          const SizedBox(height: 18),
+        ),
+        Text('Trang ${currentPage + 1}/$pages'
+            '${isDouble ? ' • Khe ngang 1 mm; tem lẻ sẽ để trống bên phải' : ''}',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black54)),
+        const SizedBox(height: 12),
+        if (isDouble)
+          const Card(child: Padding(
+            padding: EdgeInsets.all(12),
+            child: Text(
+                'Máy in K80 dùng IP/cổng ở mục Cài đặt máy in K80. '
+                'Sau khi thử, nếu giấy lệch hàng cần căn lại khe dọc cuộn tem.'),
+          )),
+        if (!isDouble) ...[
           OutlinedButton.icon(
             onPressed: busy ? null : share,
             icon: const Icon(Icons.picture_as_pdf_outlined),
             label: const Text('Chia sẻ PDF tem 40×30'),
           ),
           const SizedBox(height: 10),
-          FilledButton.icon(
-            onPressed: busy ? null : printLabels,
-            icon: busy
-                ? const SizedBox(width: 18, height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.print),
-            label: Text(busy
-                ? 'Đang in'
-                : 'In ${widget.labels.length} tem qua Bluetooth'),
-          ),
-        ]),
-      );
+        ],
+        FilledButton.icon(
+          onPressed: busy ? null : printLabels,
+          icon: busy
+              ? const SizedBox(width: 18, height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.print),
+          label: Text(busy ? 'Đang in' :
+              'In ${printQueue.length} tem qua ${isDouble ? 'LAN K80' : 'Bluetooth'}'),
+        ),
+      ]),
+    );
+  }
 
   Future<void> printLabels() async {
     setState(() => busy = true);
     try {
-      await ProductLabelPrinter.print(context, widget.labels, showPrice);
+      await savePreference();
+      final effectiveMode = codeMode == 'imei' &&
+          !widget.labels.every((label) => label.isImei)
+          ? 'auto' : codeMode;
+      if (paperMode == 'lan_double') {
+        await ProductLabelPrinter.printDoubleLan(
+            context, widget.labels, showPrice, effectiveMode, copies);
+      } else {
+        final queue = <ProductLabelData>[
+          for (final label in widget.labels)
+            for (var i = 0; i < copies; i++) label,
+        ];
+        await ProductLabelPrinter.print(
+            context, queue, showPrice, codeMode: effectiveMode);
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Đã gửi tem tới máy in')));
@@ -8109,7 +8266,8 @@ class _LabelPreviewPageState extends State<LabelPreviewPage> {
   Future<void> share() async {
     setState(() => busy = true);
     try {
-      await ProductLabelPrinter.share(context, widget.labels, showPrice);
+      await ProductLabelPrinter.share(
+          context, widget.labels, showPrice);
     } catch (error) {
       if (mounted) showError(context, error);
     }
