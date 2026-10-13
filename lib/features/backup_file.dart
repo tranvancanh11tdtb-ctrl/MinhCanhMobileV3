@@ -28,7 +28,7 @@ String parseMinhCanhBackupFile(Uint8List bytes) {
 
 extension BackupFileWorkflow on _BackupPageState {
   Future<void> saveBackupFile() async {
-    setState(() => busy = true);
+    updateBackupBusy(true);
     try {
       final text = await StoreDb.instance.exportBackup();
       final name = 'MinhCanhMobile-backup-${DateTime.now().millisecondsSinceEpoch}.json';
@@ -47,7 +47,7 @@ extension BackupFileWorkflow on _BackupPageState {
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {
-      if (mounted) setState(() => busy = false);
+      updateBackupBusy(false);
     }
   }
 
@@ -79,7 +79,7 @@ extension BackupFileWorkflow on _BackupPageState {
         'Toàn bộ dữ liệu hiện có trong ứng dụng này sẽ được thay thế. Tiếp tục?',
       );
       if (!proceed || !mounted) return;
-      setState(() => busy = true);
+      updateBackupBusy(true);
       await StoreDb.instance.restoreBackup(source);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -90,7 +90,7 @@ extension BackupFileWorkflow on _BackupPageState {
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {
-      if (mounted) setState(() => busy = false);
+      updateBackupBusy(false);
     }
   }
 }
