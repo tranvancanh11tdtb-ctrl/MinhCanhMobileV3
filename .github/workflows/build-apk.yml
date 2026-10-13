@@ -63,6 +63,38 @@ jobs:
       - name: Generate Android project
         run: flutter create --platforms android --org vn.minhcanhmobile .
 
+      - name: Use separate package and launcher name for test APK
+        if: github.head_ref == 'feature/lan-tspl-k80'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          gradle = Path('android/app/build.gradle.kts')
+          text = gradle.read_text(encoding='utf-8')
+          modified, replacements = re.subn(
+              r'(applicationId\s*=\s*")[^"]+(")',
+              r'\g<1>vn.minhcanhmobile.minh_canh_mobile_v3.test\g<2>',
+              text,
+              count=1)
+          if replacements != 1:
+              raise RuntimeError('Application ID not found in Android build file')
+          gradle.write_text(modified, encoding='utf-8')
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text(encoding='utf-8')
+          modified, replacements = re.subn(
+              r'android:label="[^"]*"',
+              'android:label="Minh Cảnh TEST"',
+              text,
+              count=1)
+          if replacements != 1:
+              raise RuntimeError('Android application label not found')
+          manifest.write_text(modified, encoding='utf-8')
+          print('Test APK package: vn.minhcanhmobile.minh_canh_mobile_v3.test')
+          PY
+
       - name: Configure Android camera and printer permissions
         shell: bash
         run: |
@@ -99,7 +131,7 @@ jobs:
       - name: Save APK
         uses: actions/upload-artifact@v4
         with:
-          name: MinhCanhMobileV3-APK
+          name: ${{ github.head_ref == 'feature/lan-tspl-k80' && 'MinhCanhMobileTEST-APK' || 'MinhCanhMobileV3-APK' }}
           path: build/app/outputs/flutter-apk/app-release.apk
 
       - name: Prepare Android APK signer
